@@ -127,14 +127,15 @@ deferred until the operator says unattended runs are in scope.
 | `feed.json` | `POST /showroom-streams/api/public/web/catalog/v1` |
 | `token.json` | `GET /stream/token-data/v1/web/visitor` |
 | `master.m3u8` | CDN master playlist |
-| `hd.m3u8` | CDN media playlist |
+| `hd.m3u8` | CDN media playlist (best rendition) |
+| `ld.m3u8` | CDN media playlist (worst rendition) |
 
 Ids, aliases and CDN hosts are replaced with fixed synthetic values of the same
 shape (22-character ids, `cinema-in41.tango.me` kept as a host). Names,
 descriptions and thumbnails come from a public profile and are genericised.
-Tokens do not appear: `token.json` carries `expireAt` as `now + 10`, and the
-harness replaces it with a value a few seconds ahead of the test clock on each
-read, so refreshing is testable without a wall clock dependency.
+Tokens do not appear: `token.json` carries a dummy token and an `expireAt` far
+enough ahead that it never lapses mid-test. The refresh path is forced
+explicitly by a test rather than by the clock.
 
 Capture is part of this build, not an input: the operator's existing visitor
 session and one live stream produce most files. Two states are rare — a live
@@ -158,10 +159,9 @@ harness; a logged-in run is simulated by seeding the jar with the
 `urlopen`. It defines a `RequestHandler` for `http` and `https` that owns a
 route table mapping `(method, host, path-without-query)` to a fixture plus
 response headers, and returns a real `yt_dlp.networking.Response`. A test builds
-its `YoutubeDL` with that handler as the only one (via
-`build_request_director`), so nothing reaches a socket. An unrouted request
-raises `AssertionError` instead of silently returning nothing, so a stray call
-in the extractor is loud.
+its `YoutubeDL` with that handler first and yt-dlp's urllib handler behind it,
+so nothing but the loopback relay reaches a socket, and an unrouted tango URL
+raises instead of silently returning nothing.
 
 The handler owns cookies because in yt-dlp the cookiejar lives inside handlers,
 below `urlopen`: it reads `Cookie` from the downloader's jar and writes
@@ -184,8 +184,8 @@ item 3 lands.
 - each `watch` code maps to its own message;
 - a profile with no live stream raises `UserNotLive`;
 - an unreadable manifest names the followers-only possibility;
-- the format URL is the loopback relay, and its media playlist points at the
-  CDN;
+- the format's manifest URL is the loopback relay, and its media URL points at
+  the CDN;
 - the feed returns the captured entries.
 
 The relay's own tests stay as they are and gain the new failure cases below.
