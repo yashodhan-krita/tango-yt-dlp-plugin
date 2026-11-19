@@ -20,6 +20,7 @@ streams a visitor cannot see; the token refresh still runs on top of it.
 import base64
 import http.server
 import json
+import os
 import re
 import socketserver
 import threading
@@ -150,6 +151,31 @@ class _TangoRelayHandler(http.server.BaseHTTPRequestHandler):
 class _TangoRelayServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+
+# Hosts ffmpeg reaches the relay on.  Both loopback spellings are listed
+# because the bypass list is matched as text, not resolved.
+_LOOPBACK_HOSTS = ('127.0.0.1', 'localhost')
+
+
+def _exempt_loopback_from_proxy(environ=None):
+    """Keep the loopback relay out of an inherited HTTP proxy.
+
+    ffmpeg applies ``--proxy`` (and ``http_proxy``) to every request it makes,
+    including the local HLS relay, so a proxied ffmpeg never reaches the relay
+    and the recording stalls.  The bypass list is extended instead of
+    overridden, and both variable spellings are set because ffmpeg reads the
+    lowercase one while other tools read the uppercase one.  Entries already
+    present are kept as they are, so a second call changes nothing.
+    """
+    environ = os.environ if environ is None else environ
+    for name in ('no_proxy', 'NO_PROXY'):
+        entries = [entry.strip() for entry in environ.get(name, '').split(',')]
+        entries = [entry for entry in entries if entry]
+        present = {entry.lower() for entry in entries}
+        missing = [host for host in _LOOPBACK_HOSTS if host not in present]
+        if missing:
+            environ[name] = ','.join(entries + missing)
 
 
 class TangoHlsRelay:
@@ -607,6 +633,7 @@ class TangoBase(InfoExtractor):
         if refresher.username:
             master_url = f'{master_url}&username={refresher.username}'
         relay = TangoHlsRelay(refresher, master_url)
+        _exempt_loopback_from_proxy()
         formats, subtitles = self._hls_formats(
             relay.url(), stream_id, live=is_live)
         if not formats:

@@ -9,14 +9,20 @@ Run with the interpreter that ships with yt-dlp so ``yt_dlp`` is importable::
 import base64
 import http.cookiejar
 import json
+import os
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlparse
 
 from yt_dlp.networking.exceptions import RequestError
 from yt_dlp.utils import ExtractorError
 
-from yt_dlp_plugins.extractor.tango import TangoFeedIE, TangoIE
+from yt_dlp_plugins.extractor.tango import (
+    TangoFeedIE,
+    TangoIE,
+    _exempt_loopback_from_proxy,
+)
 
 from tests.fake_net import (
     ALIAS,
@@ -178,6 +184,14 @@ class ExtractionTest(unittest.TestCase):
         feed = TangoFeedIE(make_downloader(base_routes()))._real_extract(
             'https://www.tango.me/live')
         self.assertEqual([entry['id'] for entry in feed['entries']], [STREAM_ID])
+
+    def test_loopback_is_exempt_from_the_proxy(self):
+        with mock.patch.dict(os.environ, {'no_proxy': 'corp.example'}, clear=True):
+            _exempt_loopback_from_proxy()
+            self.assertEqual(os.environ['no_proxy'], 'corp.example,127.0.0.1,localhost')
+            self.assertEqual(os.environ['NO_PROXY'], '127.0.0.1,localhost')
+            _exempt_loopback_from_proxy()
+            self.assertEqual(os.environ['no_proxy'], 'corp.example,127.0.0.1,localhost')
 
 
 if __name__ == '__main__':
