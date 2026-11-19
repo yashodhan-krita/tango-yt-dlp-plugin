@@ -644,6 +644,12 @@ class TangoBase(InfoExtractor):
             'tags': traverse_obj(details, ('tags', ...)),
             'age_limit': 18,
         }
+        # The watch document reports how long the broadcast has been running,
+        # so a live recording can be dated.  A finished recording's timestamp
+        # would be its start, which the document does not carry.
+        duration_ms = int_or_none(stream.get('duration')) if is_live else None
+        if duration_ms is not None:
+            info['timestamp'] = int(time.time()) - duration_ms // 1000
         if not settings.get('videoEnabled', True) or settings.get('audioRoom'):
             self.to_screen('This stream is audio-only')
         return info

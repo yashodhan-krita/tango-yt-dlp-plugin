@@ -23,6 +23,7 @@ from tests.fake_net import (
     STREAM_ID,
     Reply,
     base_routes,
+    fixture,
     fixture_reply,
     make_downloader,
     requests_to,
@@ -126,6 +127,25 @@ class ExtractionTest(unittest.TestCase):
         self.assertTrue(info['formats'])
         self.assertEqual(urlparse(info['formats'][0]['url']).hostname, '127.0.0.1')
         self.assertEqual(urlparse(info['formats'][0]['manifest_url']).hostname, '127.0.0.1')
+
+    def test_a_live_stream_carries_its_start_time(self):
+        info = TangoIE(make_downloader(base_routes()))._real_extract(
+            f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertAlmostEqual(info['timestamp'], int(time.time()) - 4885, delta=5)
+
+    def test_only_a_timed_live_stream_carries_a_start_time(self):
+        for overrides in ({'status': 'ENDED'}, {'duration': None}):
+            routes = base_routes()
+            doc = json.loads(fixture('watch.json'))
+            doc['details']['stream'].update(overrides)
+            routes[('POST', 'www.tango.me', f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = Reply(
+                json.dumps(doc).encode(),
+                headers=(('Content-Type', 'application/json'),))
+            with self.subTest(overrides):
+                info = TangoIE(make_downloader(
+                    routes, params={'no_warnings': True}))._real_extract(
+                    f'https://www.tango.me/stream/{STREAM_ID}')
+                self.assertNotIn('timestamp', info)
 
     def test_alias_and_at_alias_reach_the_same_stream(self):
         for entry in (ALIAS, f'@{ALIAS}'):
