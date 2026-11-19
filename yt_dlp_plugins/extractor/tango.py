@@ -287,11 +287,31 @@ class TangoBase(InfoExtractor):
         headers.update(extra)
         return headers
 
+    def _retry(self, func, *, fatal=True):
+        """Run a control call through yt-dlp's extractor retry budget.
+
+        ``fatal=False`` warns and returns ``None`` when the budget runs out.
+        ``fatal=True`` re-raises the last failure as unexpected: yt-dlp marks
+        transport errors 'expected' (not a bug in yt-dlp), but for a control
+        call the site is at fault, not the URL.
+        """
+        try:
+            for retry in self.RetryManager(fatal=fatal):
+                try:
+                    return func()
+                except ExtractorError as err:
+                    retry.error = err
+        except ExtractorError as err:
+            raise ExtractorError(
+                err.orig_msg, cause=err.cause, video_id=err.video_id) from err
+        return None
+
     def _api_json(self, path, video_id, note, query=None, data=None,
-                  headers=None, fatal=True):
+                  headers=None, fatal=True, expected_status=None):
         return self._download_json(
             f'{self._API_BASE}{path}', video_id, note=note,
             query=query, data=data, fatal=fatal,
+            expected_status=expected_status,
             headers=self._api_headers(**(headers or {})),
         )
 
@@ -406,19 +426,22 @@ class TangoBase(InfoExtractor):
         alias_or_id = (alias_or_id or '').lstrip('@')
         if re.fullmatch(_STREAM_ID_RE, alias_or_id):
             return alias_or_id
-        account_id = (self._download_webpage(
+        # A rejected alias or an offline broadcaster answers 404, which is a
+        # semantic answer rather than a transport failure: accept it so the
+        # retry budget is not spent on it.
+        account_id = (self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/visitors/profilealias/api/alias/convert',
             alias_or_id, note='Resolving profile alias',
-            query={'alias': alias_or_id}, fatal=False,
-            headers=self._api_headers()) or '').strip()
+            query={'alias': alias_or_id}, fatal=True, expected_status=404,
+            headers=self._api_headers())) or '').strip()
         if not account_id:
             raise ExtractorError(
                 f'No tango.me profile found for "{alias_or_id}"', expected=True)
-        stream_id = (self._download_webpage(
+        stream_id = (self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/showroom-streams/api/public/stream/v1/id',
             alias_or_id, note='Looking for a live stream',
-            query={'broadcasterId': account_id}, fatal=False,
-            headers=self._api_headers()) or '').strip()
+            query={'broadcasterId': account_id}, fatal=True,
+            expected_status=404, headers=self._api_headers())) or '').strip()
         if not stream_id:
             raise UserNotLive(video_id=alias_or_id)
         return stream_id
@@ -429,10 +452,10 @@ class TangoBase(InfoExtractor):
         This call is what authorises the CDN; without it the playlists answer
         401 even with a valid token.
         """
-        data = self._api_json(
+        data = self._retry(lambda: self._api_json(
             f'/visitors/stream/client/v2/stream/{stream_id}/watch', stream_id,
             note='Joining stream', query={'requestId': ''},
-            data=b'', headers={'Content-Type': 'application/json'}, fatal=False)
+            data=b'', headers={'Content-Type': 'application/json'}))
         if not isinstance(data, dict):
             raise ExtractorError('tango.me stream lookup failed', expected=True)
         if data.get('code') != 'OK' or not data.get('details', {}).get('stream'):
@@ -584,12 +607,12 @@ class TangoFeedIE(TangoBase):
 
     def _real_extract(self, url):
         self._ensure_session('live')
-        data = self._api_json(
+        data = self._retry(lambda: self._api_json(
             '/showroom-streams/api/public/web/catalog/v1', 'live',
             note='Downloading live feed', query={'traceId': str(uuid.uuid4())},
             data=json.dumps({'size': 30, 'platform': 'web_desktop',
                              'hMarketingCampaign': False}).encode(),
-            headers={'Content-Type': 'application/json'})
+            headers={'Content-Type': 'application/json'}))
         items = traverse_obj(data, ('catalogItems', ...)) or []
         entries = []
         for item in items:
