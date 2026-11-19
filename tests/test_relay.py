@@ -35,6 +35,14 @@ MEDIA = (
     'https://cinema-in41.tango.me/v2/sh/a235d4123e1c7c969de1afd213008979/69c931ee/4951.ts?tech=lhls\n'
 ).encode()
 
+MEDIA_PATH = '/v2/hd/live.m3u8?m=x'
+
+LIVE_MASTER = (
+    '#EXTM3U\n'
+    '#EXT-X-STREAM-INF:BANDWIDTH=2277000,RESOLUTION=1280x720\n'
+    '/v2/hd/live.m3u8?m=x\n'
+).encode()
+
 
 class FakeRefresher:
     ie = mock.Mock()
@@ -86,6 +94,11 @@ def make_relay():
 def _throttled():
     return HTTPError(Response(io.BytesIO(b''), 'https://cdn/x',
                              email.message.Message(), 403))
+
+
+def http_404():
+    return HTTPError(Response(io.BytesIO(b''), 'https://cdn/x',
+                             email.message.Message(), 404))
 
 
 class PlaylistRewriteTest(unittest.TestCase):
@@ -167,6 +180,33 @@ class ThrottlingFallbackTest(unittest.TestCase):
         self.assertEqual(
             _end_playlist(b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/a.m3u8\n'),
             b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/a.m3u8\n')
+
+
+class EndedStreamTest(unittest.TestCase):
+    def test_a_served_media_playlist_that_404s_ends_cleanly(self):
+        relay, refresher = relay_with([LIVE_MASTER, MEDIA, http_404()])
+        self.addCleanup(relay.close)
+        relay.fetch(relay.master_path)     # emits MEDIA_PATH
+        relay.fetch(MEDIA_PATH)            # serves and caches it
+        status, _, body = relay.fetch(MEDIA_PATH)
+        self.assertEqual(status, 200)
+        self.assertTrue(body.endswith(b'#EXT-X-ENDLIST\n'))
+        refresher.ie.report_warning.assert_called_once()
+
+    def test_a_path_the_relay_never_served_still_raises(self):
+        relay, _ = relay_with([http_404()])
+        self.addCleanup(relay.close)
+        with self.assertRaises(HTTPError):
+            relay.fetch('/v2/unknown/x.m3u8')
+
+    def test_the_ended_playlist_is_reused(self):
+        relay, refresher = relay_with([LIVE_MASTER, MEDIA, http_404()])
+        self.addCleanup(relay.close)
+        relay.fetch(relay.master_path)
+        relay.fetch(MEDIA_PATH)
+        relay.fetch(MEDIA_PATH)
+        relay.fetch(MEDIA_PATH)
+        self.assertEqual(len(refresher.ie._downloader.requests), 3)
 
 
 if __name__ == '__main__':

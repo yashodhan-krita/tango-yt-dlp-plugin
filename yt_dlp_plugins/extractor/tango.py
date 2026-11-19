@@ -104,6 +104,16 @@ class TangoTokenRefresher:
                 self._refreshing = False
 
 
+# What ffmpeg gets once the CDN has thrown the real media playlist away:
+# structurally valid, nothing left in it, so playback finalises at once.
+_ENDED_MEDIA_PLAYLIST = (
+    b'#EXTM3U\n'
+    b'#EXT-X-VERSION:7\n'
+    b'#EXT-X-TARGETDURATION:1\n'
+    b'#EXT-X-ENDLIST\n'
+)
+
+
 def _end_playlist(body):
     """Mark a cached media playlist as finished, so ffmpeg stops cleanly."""
     if b'#EXT-X-STREAM-INF' in body or b'#EXT-X-ENDLIST' in body:
@@ -166,7 +176,9 @@ class TangoHlsRelay:
         self.master_path = parts.path + (f'?{parts.query}' if parts.query else '')
         self._last_request = time.time()
         self._cache = {}
+        self._served = set()
         self._warned_stale = False
+        self._warned_ended = False
         self._server = _TangoRelayServer(('127.0.0.1', 0), _TangoRelayHandler)
         self._server.relay = self
         self.port = self._server.server_address[1]
@@ -194,6 +206,11 @@ class TangoHlsRelay:
 
     def fetch(self, path):
         self._last_request = time.time()
+        cached = self._cache.get(path)
+        # A playlist this relay already ended stays ended: the CDN would only
+        # answer 404 again, so ffmpeg is served from the cache.
+        if cached and b'#EXT-X-ENDLIST' in cached[0]:
+            return 200, 'application/vnd.apple.mpegurl', cached[0]
         url = f'{self.upstream}{path}'
         last_error = None
         # Two tries: the token may have expired between playlist reloads.  The
@@ -216,12 +233,27 @@ class TangoHlsRelay:
                 break
             except HTTPError as err:
                 last_error = err
+                # The CDN throws playlists away when the broadcast stops, so
+                # a 404/410 for one this relay already served or emitted means
+                # the stream is over: end the recording instead of failing it.
+                # Checked before the retry decision, so an ended stream does
+                # not burn a token refresh.
+                if err.status in (404, 410) and path in self._served:
+                    body = _end_playlist(
+                        cached[0] if cached else _ENDED_MEDIA_PLAYLIST)
+                    self._cache[path] = (
+                        body, 'application/vnd.apple.mpegurl', time.time())
+                    if not self._warned_ended:
+                        self.refresher.ie.report_warning(
+                            'The stream has ended (the CDN answered 404); '
+                            'finishing the recording')
+                        self._warned_ended = True
+                    return 200, 'application/vnd.apple.mpegurl', body
                 if err.status not in (401, 403, 500, 502, 503, 504):
                     raise
             except TransportError as err:
                 last_error = err
         else:
-            cached = self._cache.get(path)
             if cached:
                 age = time.time() - cached[2]
                 if age < self.STALE_PLAYLIST_MAX_AGE:
@@ -241,6 +273,7 @@ class TangoHlsRelay:
             raise last_error
 
         self._warned_stale = False
+        self._served.add(path)
 
         if body.lstrip().startswith(b'#EXTM3U'):
             body = self._rewrite_playlist(body, url)
@@ -260,7 +293,11 @@ class TangoHlsRelay:
             def relay_relative(match):
                 uri = urllib.parse.urljoin(upstream_url, match.group(1))
                 parts = urllib.parse.urlsplit(uri)
-                return parts.path + (f'?{parts.query}' if parts.query else '')
+                path = parts.path + (f'?{parts.query}' if parts.query else '')
+                # The variant now counts as served: if the CDN later answers
+                # 404 for it, the recording ends instead of failing.
+                self._served.add(path)
+                return path
 
             return re.sub(r'^(?!#)(\S+)$', relay_relative, text,
                           flags=re.MULTILINE).encode()
