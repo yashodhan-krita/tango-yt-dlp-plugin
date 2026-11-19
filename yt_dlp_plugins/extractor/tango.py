@@ -24,12 +24,12 @@ import re
 import socketserver
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 
 from yt_dlp.extractor.common import InfoExtractor
+from yt_dlp.networking import Request
+from yt_dlp.networking.exceptions import HTTPError, TransportError
 from yt_dlp.utils import (
     ExtractorError,
     UserNotLive,
@@ -203,22 +203,22 @@ class TangoHlsRelay:
             if attempt:
                 self.refresher.ensure(force=True)
                 time.sleep(1)
-            request = urllib.request.Request(url, headers={
+            request = Request(url, headers={
                 'Cookie': self.refresher.cookie_header(),
                 'Origin': 'https://www.tango.me',
                 'Referer': 'https://www.tango.me/',
                 'Accept': '*/*',
-            })
+            }, extensions={'timeout': 30})
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
+                with self.refresher.ie._downloader.urlopen(request) as response:
                     body = response.read()
                     content_type = response.headers.get('Content-Type') or 'text/plain'
                 break
-            except urllib.error.HTTPError as err:
+            except HTTPError as err:
                 last_error = err
-                if err.code not in (401, 403, 500, 502, 503, 504):
+                if err.status not in (401, 403, 500, 502, 503, 504):
                     raise
-            except urllib.error.URLError as err:
+            except TransportError as err:
                 last_error = err
         else:
             cached = self._cache.get(path)

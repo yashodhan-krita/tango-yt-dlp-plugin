@@ -5,11 +5,15 @@ Run with the interpreter that ships with yt-dlp so ``yt_dlp`` is importable::
     /opt/homebrew/Cellar/yt-dlp/*/libexec/bin/python -m unittest discover tests
 """
 
+import email.message
 import io
 import time
-import urllib.error
+import types
 import unittest
 from unittest import mock
+
+from yt_dlp.networking import Response
+from yt_dlp.networking.exceptions import HTTPError, TransportError
 
 from yt_dlp_plugins.extractor.tango import TangoHlsRelay, _end_playlist
 
@@ -35,11 +39,42 @@ MEDIA = (
 class FakeRefresher:
     ie = mock.Mock()
 
+    def __init__(self):
+        self.forced = False
+
     def cookie_header(self):
         return 'tt=t; ttu=u; tte=1'
 
     def ensure(self, force=False):
-        pass
+        if force:
+            self.forced = True
+
+
+class RecordingDownloader:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.requests = []
+
+    def urlopen(self, request):
+        self.requests.append(request)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return playlist_response(outcome)
+
+
+def relay_with(outcomes):
+    refresher = FakeRefresher()
+    refresher.ie = types.SimpleNamespace(
+        _downloader=RecordingDownloader(outcomes), report_warning=mock.Mock())
+    return TangoHlsRelay(
+        refresher, 'https://cinema-in41.tango.me/v2/x/master.m3u8'), refresher
+
+
+def playlist_response(body):
+    headers = email.message.Message()
+    headers.add_header('Content-Type', 'application/vnd.apple.mpegurl')
+    return Response(io.BytesIO(body), 'https://cdn/x', headers, 200)
 
 
 def make_relay():
@@ -49,8 +84,8 @@ def make_relay():
 
 
 def _throttled():
-    return urllib.error.HTTPError(
-        'https://cdn', 403, 'Forbidden', None, io.BytesIO(b''))
+    return HTTPError(Response(io.BytesIO(b''), 'https://cdn/x',
+                             email.message.Message(), 403))
 
 
 class PlaylistRewriteTest(unittest.TestCase):
@@ -79,37 +114,52 @@ class PlaylistRewriteTest(unittest.TestCase):
         ])
 
 
+class UpstreamRequestTest(unittest.TestCase):
+    def test_the_upstream_request_carries_a_timeout_and_the_token(self):
+        relay, _ = relay_with([MASTER])
+        self.addCleanup(relay.close)
+        relay.fetch(relay.master_path)
+        request = relay.refresher.ie._downloader.requests[0]
+        self.assertEqual(request.extensions['timeout'], 30)
+        self.assertEqual(request.headers['Cookie'], 'tt=t; ttu=u; tte=1')
+        self.assertIn('https://www.tango.me/', request.headers['Referer'])
+
+    def test_a_transport_error_forces_a_refresh(self):
+        relay, refresher = relay_with([TransportError('reset'), MASTER])
+        self.addCleanup(relay.close)
+        status, _, _ = relay.fetch(relay.master_path)
+        self.assertEqual(status, 200)
+        self.assertTrue(refresher.forced)
+
+
 class ThrottlingFallbackTest(unittest.TestCase):
-    def setUp(self):
-        self.relay = make_relay()
-
-    def tearDown(self):
-        self.relay.close()
-
     def test_replays_last_playlist_when_the_token_is_throttled(self):
-        path = self.relay.master_path
-        self.relay._cache[path] = (b'#EXTM3U\n#EXT-X-ENDLIST\n',
-                                   'application/vnd.apple.mpegurl', time.time())
-        with mock.patch('urllib.request.urlopen', side_effect=_throttled()), \
-                mock.patch('time.sleep'):
-            status, _, body = self.relay.fetch(path)
+        relay, _ = relay_with([_throttled(), _throttled()])
+        self.addCleanup(relay.close)
+        path = relay.master_path
+        relay._cache[path] = (b'#EXTM3U\n#EXT-X-ENDLIST\n',
+                               'application/vnd.apple.mpegurl', time.time())
+        with mock.patch('time.sleep'):
+            status, _, body = relay.fetch(path)
         self.assertEqual(status, 200)
         self.assertEqual(body, b'#EXTM3U\n#EXT-X-ENDLIST\n')
 
     def test_raises_when_throttled_without_a_cached_playlist(self):
-        with mock.patch('urllib.request.urlopen', side_effect=_throttled()), \
-                mock.patch('time.sleep'):
-            with self.assertRaises(urllib.error.HTTPError):
-                self.relay.fetch('/v2/nothing/live.m3u8')
+        relay, _ = relay_with([_throttled(), _throttled()])
+        self.addCleanup(relay.close)
+        with mock.patch('time.sleep'):
+            with self.assertRaises(HTTPError):
+                relay.fetch('/v2/nothing/live.m3u8')
 
     def test_ends_the_recording_when_the_token_stays_gone(self):
-        path = self.relay.master_path
-        self.relay._cache[path] = (
+        relay, _ = relay_with([_throttled(), _throttled()])
+        self.addCleanup(relay.close)
+        path = relay.master_path
+        relay._cache[path] = (
             b'#EXTM3U\n#EXTINF:1.0,\nhttps://cdn/1.ts\n',
             'application/vnd.apple.mpegurl', time.time() - 3600)
-        with mock.patch('urllib.request.urlopen', side_effect=_throttled()), \
-                mock.patch('time.sleep'):
-            status, _, body = self.relay.fetch(path)
+        with mock.patch('time.sleep'):
+            status, _, body = relay.fetch(path)
         self.assertEqual(status, 200)
         self.assertTrue(body.endswith(b'#EXT-X-ENDLIST\n'))
 
