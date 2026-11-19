@@ -1,0 +1,81 @@
+{
+  "code": "OK",
+  "details": {
+    "stream": {
+      "id": "AAAABBBBCCCCDDDDEEEEFF",
+      "encryptedAccountId": "GGGGHHHHIIIIJJJJKKKKLL",
+      "duration": "4885285",
+      "thumbnail": "https://cget.tango.me/test.jpg",
+      "thumbnailWidth": 0,
+      "thumbnailHeight": 0,
+      "status": "LIVING",
+      "streamKind": "PUBLIC",
+      "liveListUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8",
+      "completeListUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8",
+      "previewListUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/preview.m3u8",
+      "masterListUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8",
+      "streamProtocol": "SRT",
+      "egressUrl": "",
+      "landscape": false
+    },
+    "anchor": {
+      "encryptedAccountId": "GGGGHHHHIIIIJJJJKKKKLL"
+    },
+    "anchorPoints": 4358899,
+    "viewerCount": 7,
+    "isPublic": true,
+    "source": "feed",
+    "totalPointsInStream": 82,
+    "uniqueViewerCount": 121,
+    "tags": [
+      "dating"
+    ],
+    "settings": {
+      "videoEnabled": true,
+      "audioEnabled": true,
+      "incognitoEnabled": false,
+      "muteGiftSound": false,
+      "liveChatForFollowersOnly": false,
+      "audioRoom": false
+    },
+    "viewInfo": {
+      "streamId": "AAAABBBBCCCCDDDDEEEEFF",
+      "hlsStreamInfo": {
+        "ldUrl": "https://cinema-in41.tango.me/v2/33333333333333333333333333333333/ld.m3u8",
+        "sdUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8",
+        "hdUrl": "https://cinema-in41.tango.me/v2/22222222222222222222222222222222/hd.m3u8",
+        "masterUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8",
+        "previewUrl": "https://cinema-in41.tango.me/v2/11111111111111111111111111111111/preview.m3u8",
+        "livePreviewUrl": ""
+      },
+      "srtStreamInfo": {
+        "regions": [
+          {"region": "eu", "edges": [{"ip": "172.238.123.253", "port": 5678}]},
+          {"region": "asia", "edges": [{"ip": "172.236.157.143", "port": 5678}]},
+          {"region": "india", "edges": [{"ip": "172.236.177.181", "port": 5678}]},
+          {"region": "us-east", "edges": [{"ip": "172.232.0.8", "port": 5678}]}
+        ]
+      },
+      "webRtcStreamInfo": {
+        "enabled": true,
+        "pttActive": false
+      },
+      "webSrtStreamInfo": {
+        "regions": [
+          {"region": "eu", "edges": [{"ip": "10.0.20.96", "port": 5678}]},
+          {"region": "asia", "edges": [{"ip": "10.3.47.0", "port": 5678}]},
+          {"region": "india", "edges": [{"ip": "10.2.8.120", "port": 5678}]},
+          {"region": "us-east", "edges": [{"ip": "10.1.70.101", "port": 5678}]}
+        ]
+      }
+    },
+    "approved": false,
+    "moderationLevel": 4,
+    "moderationScore": 0.5000001499236483,
+    "nsfw": false
+  },
+  "giftDrawerVersion": 7546,
+  "bonusLevel": 0,
+  "bonusPercentage": 0,
+  "minGiftPriceForBonus": 0
+}
