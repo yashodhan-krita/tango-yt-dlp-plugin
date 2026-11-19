@@ -22,6 +22,12 @@ from tests.fake_net import (
     requests_to,
 )
 
+WATCH_ERRORS = {
+    'watch_wrong_id.json': 'No tango.me stream has that id',
+    'watch_terminated.json': 'The stream has ended',
+    'watch_bad_request.json': 'audio rooms are the usual cause',
+}
+
 
 class ExtractionTest(unittest.TestCase):
     def test_check_in_stores_the_visitor_token(self):
@@ -59,6 +65,23 @@ class ExtractionTest(unittest.TestCase):
             TangoIE(ydl)._resolve_stream_id('nobody')
         self.assertIn('No tango.me profile found', str(ctx.exception))
         self.assertEqual(len(requests_to(ydl, '/alias/convert')), 1)
+
+    def test_each_watch_code_has_its_own_message(self):
+        for fixture_name, message in WATCH_ERRORS.items():
+            routes = base_routes()
+            routes[('POST', 'www.tango.me', f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = fixture_reply(fixture_name)
+            with self.subTest(fixture_name), self.assertRaises(ExtractorError) as ctx:
+                TangoIE(make_downloader(routes))._watch(STREAM_ID)
+            self.assertIn(message, str(ctx.exception))
+            self.assertTrue(ctx.exception.expected)
+
+    def test_a_401_points_at_the_logged_in_retry(self):
+        routes = base_routes()
+        routes[('POST', 'www.tango.me', f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = Reply(b'', status=401)
+        with self.assertRaises(ExtractorError) as ctx:
+            TangoIE(make_downloader(routes))._watch(STREAM_ID)
+        self.assertIn('--cookies-from-browser chrome', str(ctx.exception))
+        self.assertTrue(ctx.exception.expected)
 
 
 if __name__ == '__main__':

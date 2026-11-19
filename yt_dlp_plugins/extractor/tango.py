@@ -42,6 +42,15 @@ _API_BASE = 'https://www.tango.me/api'
 
 _STREAM_ID_RE = r'[A-Za-z0-9_-]{22}'
 
+# The watch endpoint answers a semantic code instead of an HTTP status.  Each
+# failure has a different cause and therefore a different fix, so the code is
+# translated rather than echoed.
+_WATCH_ERRORS = {
+    'FAILED_WRONG_STREAM_ID': 'No tango.me stream has that id',
+    'FAILED_TERMINATED': 'The stream has ended',
+    'FAILED_BAD_REQUEST': 'tango.me refused the stream lookup; audio rooms are the usual cause',
+}
+
 
 class TangoTokenRefresher:
     """Keeps the CDN auth cookies fresh.
@@ -452,15 +461,25 @@ class TangoBase(InfoExtractor):
         This call is what authorises the CDN; without it the playlists answer
         401 even with a valid token.
         """
-        data = self._retry(lambda: self._api_json(
-            f'/visitors/stream/client/v2/stream/{stream_id}/watch', stream_id,
-            note='Joining stream', query={'requestId': ''},
-            data=b'', headers={'Content-Type': 'application/json'}))
+        try:
+            data = self._retry(lambda: self._api_json(
+                f'/visitors/stream/client/v2/stream/{stream_id}/watch', stream_id,
+                note='Joining stream', query={'requestId': ''},
+                data=b'', headers={'Content-Type': 'application/json'}))
+        except ExtractorError as err:
+            if getattr(err.cause, 'status', None) in (401, 403):
+                raise ExtractorError(
+                    'tango.me refused the stream lookup. For a followers-only or '
+                    'private stream, retry with --cookies-from-browser chrome',
+                    expected=True, cause=err) from err
+            raise
         if not isinstance(data, dict):
             raise ExtractorError('tango.me stream lookup failed', expected=True)
-        if data.get('code') != 'OK' or not data.get('details', {}).get('stream'):
-            raise UserNotLive(video_id=stream_id,
-                              msg=f'Stream unavailable ({data.get("code") or "no data"})')
+        code = data.get('code')
+        if code != 'OK' or not data.get('details', {}).get('stream'):
+            raise ExtractorError(
+                _WATCH_ERRORS.get(code) or f'tango.me returned {code or "no data"}',
+                expected=True)
         return data
 
     def _profile_metadata(self, video_id):
