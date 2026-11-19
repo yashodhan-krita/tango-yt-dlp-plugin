@@ -428,7 +428,7 @@ def test_a_stream_extracts_from_the_fixtures(self):
     self.assertEqual(info['uploader_id'], ALIAS)
     self.assertEqual(info['channel_url'], f'https://www.tango.me/{ALIAS}')
     self.assertTrue(info['formats'])
-    self.assertEqual(urlparse(info['formats'][0]['url']).hostname, CDN)
+    self.assertEqual(urlparse(info['formats'][0]['url']).hostname, '127.0.0.1')
     self.assertEqual(urlparse(info['formats'][0]['manifest_url']).hostname, '127.0.0.1')
 
 def test_alias_and_at_alias_reach_the_same_stream(self):
