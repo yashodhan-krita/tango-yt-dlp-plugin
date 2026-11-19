@@ -12,8 +12,9 @@ import json
 import time
 import types
 import unittest
+from unittest import mock
 
-from yt_dlp_plugins.extractor.tango import TangoIE
+from yt_dlp_plugins.extractor.tango import TangoIE, TangoTokenRefresher
 
 
 def _cookie(domain, name, value='x'):
@@ -77,6 +78,15 @@ class HasVisitorTokenTest(unittest.TestCase):
     def test_unparseable_token_is_treated_as_usable(self):
         ie, _ = _extractor_with(_cookie('www.tango.me', 'Tango-VT', 'opaque'))
         self.assertTrue(ie._has_visitor_token())
+
+
+class TokenRefreshTest(unittest.TestCase):
+    def test_a_refresh_does_not_print_a_progress_line(self):
+        ie = mock.Mock()
+        ie._issue_token.return_value = {'token': 't', 'username': 'u', 'expireAt': 2 ** 31}
+        TangoTokenRefresher(ie, 'v').refresh()
+        self.assertIsNone(ie._issue_token.call_args.kwargs['note'])
+        ie.write_debug.assert_called_once()
 
 
 if __name__ == '__main__':

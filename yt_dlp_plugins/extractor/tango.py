@@ -87,8 +87,9 @@ class TangoTokenRefresher:
         return f'tt={self._token}; ttu={self.username}; tte={int(self.expires)}'
 
     def refresh(self):
-        data = self.ie._issue_token(self.video_id, note='Refreshing stream token')
+        data = self.ie._issue_token(self.video_id, note=None)
         self._store(data['token'], data['username'], data['expireAt'])
+        self.ie.write_debug(f'Stream token refreshed (expires at {int(self.expires)})')
 
     def ensure(self, force=False):
         with self._lock:
