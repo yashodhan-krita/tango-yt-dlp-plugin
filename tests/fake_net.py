@@ -70,8 +70,11 @@ def base_routes() -> dict[tuple[str, str, str], Reply | list[Reply]]:
         ('POST', 'www.tango.me',
          '/api/visitor-lobby/api/public/visitors/v1/check-in'): fixture_reply(
              'check_in.json', headers=(
-                 ('Set-Cookie', 'Tango-VT=visitor-token; Path=/; Domain=www.tango.me'),
-                 ('Set-Cookie', 'Tango-SD=visitor-session; Path=/; Domain=www.tango.me'),
+                 # Host-only cookies, like the real check-in response: the
+                 # visitor identity lands on ``www.tango.me`` (no leading dot),
+                 # separate from the account session on ``.www.tango.me``.
+                 ('Set-Cookie', 'Tango-VT=visitor-token; Path=/'),
+                 ('Set-Cookie', 'Tango-SD=visitor-session; Path=/'),
                  ('Content-Type', 'application/json'))),
         ('GET', 'www.tango.me',
          '/api/stream/token-data/v1/web/visitor'): fixture_reply(

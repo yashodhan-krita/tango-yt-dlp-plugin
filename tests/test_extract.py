@@ -6,14 +6,20 @@ Run with the interpreter that ships with yt-dlp so ``yt_dlp`` is importable::
         -m unittest discover -s tests
 """
 
+import base64
+import http.cookiejar
+import json
+import time
 import unittest
+from urllib.parse import urlparse
 
 from yt_dlp.networking.exceptions import RequestError
 from yt_dlp.utils import ExtractorError
 
-from yt_dlp_plugins.extractor.tango import TangoIE
+from yt_dlp_plugins.extractor.tango import TangoFeedIE, TangoIE
 
 from tests.fake_net import (
+    ALIAS,
     STREAM_ID,
     Reply,
     base_routes,
@@ -27,6 +33,32 @@ WATCH_ERRORS = {
     'watch_terminated.json': 'The stream has ended',
     'watch_bad_request.json': 'audio rooms are the usual cause',
 }
+
+
+def _cookie(domain, name, value='x'):
+    return http.cookiejar.Cookie(
+        version=0, name=name, value=value, port=None, port_specified=False,
+        domain=domain, domain_specified=domain.startswith('.'),
+        domain_initial_dot=domain.startswith('.'), path='/',
+        path_specified=True, secure=True, expires=None, discard=False,
+        comment=None, comment_url=None, rest={}, rfc2109=False)
+
+
+def _jwt(exp):
+    def enc(part):
+        raw = json.dumps(part).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+    return f'{enc({"typ": "JWT"})}.{enc({"exp": exp})}.sig'
+
+
+def account_cookie(name):
+    """A logged-in session cookie, stored on the account domain."""
+    return _cookie('.www.tango.me', name)
+
+
+def visitor_cookie(exp):
+    """An unexpired ``Tango-VT`` visitor JWT, stored on the visitor domain."""
+    return _cookie('www.tango.me', 'Tango-VT', _jwt(exp))
 
 
 class ExtractionTest(unittest.TestCase):
@@ -82,6 +114,50 @@ class ExtractionTest(unittest.TestCase):
             TangoIE(make_downloader(routes))._watch(STREAM_ID)
         self.assertIn('--cookies-from-browser chrome', str(ctx.exception))
         self.assertTrue(ctx.exception.expected)
+
+    def test_a_stream_extracts_from_the_fixtures(self):
+        info = TangoIE(make_downloader(base_routes()))._real_extract(
+            f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertEqual(info['id'], STREAM_ID)
+        self.assertIs(info['is_live'], True)
+        self.assertEqual(info['uploader'], 'Tango Tester')
+        self.assertEqual(info['uploader_id'], ALIAS)
+        self.assertEqual(info['channel_url'], f'https://www.tango.me/{ALIAS}')
+        self.assertTrue(info['formats'])
+        self.assertEqual(urlparse(info['formats'][0]['url']).hostname, '127.0.0.1')
+        self.assertEqual(urlparse(info['formats'][0]['manifest_url']).hostname, '127.0.0.1')
+
+    def test_alias_and_at_alias_reach_the_same_stream(self):
+        for entry in (ALIAS, f'@{ALIAS}'):
+            info = TangoIE(make_downloader(base_routes()))._real_extract(
+                f'https://www.tango.me/{entry}')
+            self.assertEqual(info['id'], STREAM_ID)
+
+    def test_the_account_session_survives_the_check_in(self):
+        ydl = make_downloader(base_routes())
+        ydl.cookiejar.set_cookie(account_cookie('Tango-ST'))
+        TangoIE(ydl)._real_extract(f'https://www.tango.me/stream/{STREAM_ID}')
+        names = {(c.domain, c.name) for c in ydl.cookiejar}
+        self.assertIn(('.www.tango.me', 'Tango-ST'), names)
+        self.assertIn(('www.tango.me', 'Tango-VT'), names)
+
+    def test_an_existing_visitor_token_skips_the_check_in(self):
+        ydl = make_downloader(base_routes())
+        ydl.cookiejar.set_cookie(visitor_cookie(time.time() + 3600))
+        TangoIE(ydl)._real_extract(f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertEqual(len(requests_to(ydl, 'check-in')), 0)
+
+    def test_a_missing_profile_page_does_not_stop_the_recording(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me', f'/stream/{STREAM_ID}')] = Reply(b'', status=404)
+        info = TangoIE(make_downloader(routes))._real_extract(
+            f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertEqual(info['title'], f'{STREAM_ID} - Tango live')
+
+    def test_the_feed_lists_the_captured_stream(self):
+        feed = TangoFeedIE(make_downloader(base_routes()))._real_extract(
+            'https://www.tango.me/live')
+        self.assertEqual([entry['id'] for entry in feed['entries']], [STREAM_ID])
 
 
 if __name__ == '__main__':
