@@ -127,6 +127,135 @@ class PlaylistRewriteTest(unittest.TestCase):
         ])
 
 
+class PlaylistWindowTest(unittest.TestCase):
+    """The relay serves recent playlists as one window.
+
+    ffmpeg drops segments when a playlist reload lands after the CDN's
+    eight-segment window has moved on.  These tests pin the merge that keeps
+    them available for as long as the CDN still serves them.
+    """
+
+    def setUp(self):
+        self.relay = make_relay()
+        self.addCleanup(self.relay.close)
+
+    def merge(self, playlist):
+        return self.relay._merge_media_playlist(MEDIA_PATH, playlist)
+
+    def assert_segment_tags_local(self, playlist):
+        """Each segment URI must carry its own tags, not a tag dump above it."""
+        lines = playlist.splitlines()
+        for index, line in enumerate(lines):
+            if line.endswith('.ts?tech=lhls'):
+                self.assertTrue(lines[index - 1].startswith('#EXTINF:'),
+                                lines[index - 3:index + 1])
+
+    def test_a_late_reload_keeps_the_segments_it_would_have_lost(self):
+        self.merge(media_playlist(4, 8))
+        out = self.merge(media_playlist(10, 8))
+        self.assertEqual(segment_numbers(out), list(range(4, 18)))
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:4', out)
+        self.assert_segment_tags_local(out)
+
+    def test_the_window_is_capped_and_drops_the_oldest_first(self):
+        self.relay.PLAYLIST_WINDOW = 10
+        self.merge(media_playlist(0, 8))
+        out = self.merge(media_playlist(8, 8))
+        self.assertEqual(segment_numbers(out), list(range(6, 16)))
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:6', out)
+
+    def test_a_restarted_stream_does_not_inherit_old_segments(self):
+        self.merge(media_playlist(100, 8))
+        out = self.merge(media_playlist(0, 8))
+        self.assertEqual(segment_numbers(out), list(range(0, 8)))
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:0', out)
+
+    def test_a_key_and_discontinuity_outlive_the_segment_that_declared_them(self):
+        key = '#EXT-X-KEY:METHOD=AES-128,URI="/k/1",IV=0x0'
+        self.relay.PLAYLIST_WINDOW = 3
+        early = (
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:7\n'
+            '#EXT-X-TARGETDURATION:1\n'
+            '#EXT-X-MEDIA-SEQUENCE:1\n'
+            '#EXT-X-DISCONTINUITY-SEQUENCE:0\n'
+            f'{key}\n'
+            '#EXTINF:1.000,\n'
+            '/v2/sh/x/1.ts\n'
+            '#EXTINF:1.000,\n'
+            '/v2/sh/x/2.ts\n'
+            '#EXT-X-DISCONTINUITY\n'
+            '#EXTINF:1.000,\n'
+            '/v2/sh/x/3.ts\n'
+        )
+        self.merge(early)
+        out = self.merge(media_playlist(4, 3))
+        self.assertEqual(segment_numbers(out), [4, 5, 6])
+        self.assertIn(key, out.splitlines())
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:1', out)
+
+    def test_a_playlist_without_a_media_sequence_is_not_duplicated(self):
+        playlist = media_playlist(4950, 8, sequence=False)
+        self.merge(playlist)
+        out = self.merge(playlist)
+        self.assertEqual(segment_numbers(out), list(range(4950, 4958)))
+
+    def test_program_date_time_stays_with_its_segment(self):
+        # Real tango playlists stamp every segment; a merge that hoists the
+        # stamps into the header leaves ffmpeg a playlist it cannot parse.
+        playlist = (
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:7\n'
+            '#EXT-X-TARGETDURATION:1\n'
+            '#EXT-X-MEDIA-SEQUENCE:7\n'
+            '#EXT-X-PROGRAM-DATE-TIME:2026-11-20T13:08:45.390Z\n'
+            '#EXTINF:0.999,\n'
+            '/v2/sh/x/7.ts?tech=lhls\n'
+            '#EXT-X-PROGRAM-DATE-TIME:2026-11-20T13:08:46.389Z\n'
+            '#EXTINF:1.000,\n'
+            '/v2/sh/x/8.ts?tech=lhls\n'
+        )
+        out = self.merge(playlist).splitlines()
+        self.assertEqual(out[out.index('#EXT-X-MEDIA-SEQUENCE:7') + 1:], [
+            '#EXT-X-PROGRAM-DATE-TIME:2026-11-20T13:08:45.390Z',
+            '#EXTINF:0.999,',
+            '/v2/sh/x/7.ts?tech=lhls',
+            '#EXT-X-PROGRAM-DATE-TIME:2026-11-20T13:08:46.389Z',
+            '#EXTINF:1.000,',
+            '/v2/sh/x/8.ts?tech=lhls',
+        ])
+        self.assertEqual(out.count('#EXT-X-MEDIA-SEQUENCE:7'), 1)
+
+    def test_the_relay_serves_the_merged_playlist_to_ffmpeg(self):
+        relay, _ = relay_with([
+            media_playlist(4950, 4).encode(),
+            media_playlist(4956, 4).encode(),
+        ])
+        self.addCleanup(relay.close)
+        relay.fetch(MEDIA_PATH)
+        status, _, body = relay.fetch(MEDIA_PATH)
+        self.assertEqual(status, 200)
+        self.assertEqual(segment_numbers(body.decode()), [4950, 4951, 4952,
+                                                         4953, 4956, 4957, 4958, 4959])
+
+
+def media_playlist(start, count, *, sequence=True):
+    lines = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-TARGETDURATION:1']
+    if sequence:
+        lines.append(f'#EXT-X-MEDIA-SEQUENCE:{start}')
+    for number in range(start, start + count):
+        lines.append(f'#EXT-X-PROGRAM-DATE-TIME:2026-11-20T13:08:{number % 60:02d}.000Z')
+        lines.append('#EXTINF:1.000,')
+        lines.append(f'/v2/sh/x/{number}.ts?tech=lhls')
+    return '\n'.join(lines) + '\n'
+
+
+def segment_numbers(playlist):
+    return [int(line.rsplit('/', 1)[-1].split('.')[0])
+            for line in playlist.splitlines()
+            if line and not line.startswith('#')]
+
+
 class UpstreamRequestTest(unittest.TestCase):
     def test_the_upstream_request_carries_a_timeout_and_the_token(self):
         relay, _ = relay_with([MASTER])

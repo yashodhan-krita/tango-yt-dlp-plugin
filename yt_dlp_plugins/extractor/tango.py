@@ -125,6 +125,156 @@ def _end_playlist(body):
     return body.rstrip(b'\n') + b'\n#EXT-X-ENDLIST\n'
 
 
+_MEDIA_SEQUENCE_RE = re.compile(r'^#EXT-X-MEDIA-SEQUENCE:(\d+)')
+_DISCONTINUITY_SEQUENCE_RE = re.compile(r'^#EXT-X-DISCONTINUITY-SEQUENCE:(\d+)')
+
+# Playlist-level tags belong in the header.  Everything else that starts with
+# '#' describes the segment that follows it (#EXTINF, EXT-X-PROGRAM-DATE-TIME,
+# EXT-X-KEY, ...), so it must travel with that segment rather than stay in the
+# header; otherwise a merged window lists all the segment tags before all the
+# URIs, which ffmpeg reads as malformed.
+_HEADER_TAGS = (
+    '#EXTM3U',
+    '#EXT-X-VERSION',
+    '#EXT-X-TARGETDURATION',
+    '#EXT-X-MEDIA-SEQUENCE',
+    '#EXT-X-DISCONTINUITY-SEQUENCE',
+    '#EXT-X-PLAYLIST-TYPE',
+    '#EXT-X-INDEPENDENT-SEGMENTS',
+    '#EXT-X-I-FRAMES-ONLY',
+    '#EXT-X-START',
+)
+
+
+def _split_media_playlist(text):
+    """Split a media playlist into header, segment chunks, and end marker.
+
+    A chunk is the block of tags that applies to one segment plus its URI,
+    so a key rotation, a date stamp or a discontinuity stays attached to the
+    right segment.
+    """
+    header, chunks, pending = [], [], []
+    ended = False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line == '#EXT-X-ENDLIST':
+            ended = True
+        elif line.startswith(_HEADER_TAGS):
+            header.append(line)
+        elif line.startswith('#'):
+            pending.append(line)
+        else:
+            chunks.append((pending, line))
+            pending = []
+    return header, chunks, ended
+
+
+def _segment_number(uri):
+    """Media sequence for a playlist that omits EXT-X-MEDIA-SEQUENCE.
+
+    tango names each segment after its sequence number (``5123.ts``), which
+    is the only ordering signal left once the tag is missing.
+    """
+    name = urllib.parse.urlsplit(uri).path.rsplit('/', 1)[-1].split('.')[0]
+    return int_or_none(name)
+
+
+class _MediaWindow:
+    """Rolling union of recent media playlists for one live stream.
+
+    The CDN serves an eight-segment sliding window.  ffmpeg asks for the
+    segment after the last one it played, so a playlist reload that arrives
+    late makes it skip whatever slid out in the meantime; ffmpeg logs those
+    as ``skipping N segments`` and the recording ends up short.  Serving the
+    union of recent playlists removes the gap: the window is measured in
+    seconds of the stream, so a reload can be up to ``size`` seconds late.
+
+    ``size`` is bounded by the CDN's segment retention (measured at ~70 s:
+    a segment still downloads at 60 s old and comes back zero-length at 80),
+    so old entries must be dropped well before they expire.
+    """
+
+    def __init__(self, size):
+        self.size = size
+        self._chunks = {}          # media sequence -> (tag lines, uri)
+        self._carried = []         # key/map tags of the last pruned segment
+        self._discontinuities = 0  # EXT-X-DISCONTINUITY lines pruned away
+        self._ended = False
+
+    def merge(self, text):
+        header, chunks, ended = _split_media_playlist(text)
+        if not chunks:
+            return text
+        base = None
+        for line in header:
+            match = _MEDIA_SEQUENCE_RE.match(line)
+            if match:
+                base = int(match.group(1))
+                break
+        if base is None:
+            base = _segment_number(chunks[0][1])
+        if base is None:
+            base = 0
+
+        fresh = {base + index: chunk for index, chunk in enumerate(chunks)}
+        if self._chunks and max(fresh) < min(self._chunks):
+            # The numbering restarted (a new broadcast on the same URL), so
+            # the old segments cannot be stitched onto the new ones.
+            self._chunks.clear()
+            self._carried = []
+            self._discontinuities = 0
+        self._chunks.update(fresh)
+        self._ended = self._ended or ended
+        self._prune()
+        return self._render(header)
+
+    def _prune(self):
+        while len(self._chunks) > self.size:
+            tags, _ = self._chunks.pop(min(self._chunks))
+            key_map = [tag for tag in tags if tag.startswith(('#EXT-X-KEY:', '#EXT-X-MAP:'))]
+            if key_map:
+                self._carried = key_map
+            self._discontinuities += sum(
+                tag == '#EXT-X-DISCONTINUITY' for tag in tags)
+
+    def _render(self, header):
+        first = min(self._chunks)
+        has_sequence = any(_MEDIA_SEQUENCE_RE.match(line) for line in header)
+        has_discontinuities = any(
+            _DISCONTINUITY_SEQUENCE_RE.match(line) for line in header)
+        lines = []
+        for line in header:
+            match = _MEDIA_SEQUENCE_RE.match(line)
+            if match:
+                lines.append(f'#EXT-X-MEDIA-SEQUENCE:{first}')
+            elif _DISCONTINUITY_SEQUENCE_RE.match(line):
+                start = int(_DISCONTINUITY_SEQUENCE_RE.match(line).group(1))
+                lines.append(f'#EXT-X-DISCONTINUITY-SEQUENCE:'
+                             f'{start + self._discontinuities}')
+            else:
+                lines.append(line)
+                if line.startswith('#EXT-X-TARGETDURATION') and not has_sequence:
+                    lines.append(f'#EXT-X-MEDIA-SEQUENCE:{first}')
+        if not has_sequence and not any(
+                line.startswith('#EXT-X-TARGETDURATION') for line in header):
+            lines.append(f'#EXT-X-MEDIA-SEQUENCE:{first}')
+        if self._discontinuities and not has_discontinuities:
+            lines.append(f'#EXT-X-DISCONTINUITY-SEQUENCE:{self._discontinuities}')
+        # A key or init map still applies to the segments after the one that
+        # declared it, so it is re-emitted when that segment is pruned away.
+        first_tags = self._chunks[first][0]
+        lines.extend(tag for tag in self._carried if tag not in first_tags)
+        for seq in sorted(self._chunks):
+            tags, uri = self._chunks[seq]
+            lines.extend(tags)
+            lines.append(uri)
+        if self._ended:
+            lines.append('#EXT-X-ENDLIST')
+        return '\n'.join(lines) + '\n'
+
+
 class _TangoRelayHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
 
@@ -198,6 +348,11 @@ class TangoHlsRelay:
     # segments in it are public, so replay costs duplicates rather than loss.
     STALE_PLAYLIST_MAX_AGE = 120
 
+    # Segments kept in the merged media playlist (one second each).  The CDN
+    # refuses segments older than ~70 s, so this leaves room for the merge to
+    # lag behind the live edge without serving an empty body.
+    PLAYLIST_WINDOW = 45
+
     def __init__(self, refresher, master_url):
         self.refresher = refresher
         parts = urllib.parse.urlsplit(master_url)
@@ -206,6 +361,7 @@ class TangoHlsRelay:
         self._last_request = time.time()
         self._cache = {}
         self._served = set()
+        self._windows = {}
         self._warned_stale = False
         self._warned_ended = False
         self._server = _TangoRelayServer(('127.0.0.1', 0), _TangoRelayHandler)
@@ -305,12 +461,23 @@ class TangoHlsRelay:
         self._served.add(path)
 
         if body.lstrip().startswith(b'#EXTM3U'):
-            body = self._rewrite_playlist(body, url)
+            body = self._rewrite_playlist(body, url, path)
             content_type = 'application/vnd.apple.mpegurl'
         self._cache[path] = (body, content_type, time.time())
         return 200, content_type, body
 
-    def _rewrite_playlist(self, body, upstream_url):
+    def _merge_media_playlist(self, path, text):
+        """Serve the union of recent playlists for this stream.
+
+        Only for media playlists; the caller keeps masters on their own
+        rewrite path because their entries are variants, not segments.
+        """
+        window = self._windows.get(path)
+        if window is None:
+            window = self._windows[path] = _MediaWindow(self.PLAYLIST_WINDOW)
+        return window.merge(text)
+
+    def _rewrite_playlist(self, body, upstream_url, path=None):
         """Point ffmpeg at the CDN for segments, at the relay for playlists.
 
         Media segments are public, so ffmpeg can fetch them directly (no
@@ -330,6 +497,11 @@ class TangoHlsRelay:
 
             return re.sub(r'^(?!#)(\S+)$', relay_relative, text,
                           flags=re.MULTILINE).encode()
+
+        if path is None:
+            parts = urllib.parse.urlsplit(upstream_url)
+            path = parts.path + (f'?{parts.query}' if parts.query else '')
+        text = self._merge_media_playlist(path, text)
 
         def absolute(match):
             prefix, uri, suffix = match.groups()
