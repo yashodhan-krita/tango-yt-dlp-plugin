@@ -85,7 +85,8 @@ class TokenRefreshTest(unittest.TestCase):
         ie = mock.Mock()
         ie._issue_token.return_value = {'token': 't', 'username': 'u', 'expireAt': 2 ** 31}
         TangoTokenRefresher(ie, 'v').refresh()
-        self.assertIsNone(ie._issue_token.call_args.kwargs['note'])
+        # False silences yt-dlp; None would print its default note.
+        self.assertIs(ie._issue_token.call_args.kwargs['note'], False)
         ie.write_debug.assert_called_once()
 
 

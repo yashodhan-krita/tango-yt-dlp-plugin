@@ -87,7 +87,9 @@ class TangoTokenRefresher:
         return f'tt={self._token}; ttu={self.username}; tte={int(self.expires)}'
 
     def refresh(self):
-        data = self.ie._issue_token(self.video_id, note=None)
+        # note=False, not None: yt-dlp prints its default "Downloading
+        # webpage" line for None, and a refresh happens every eight seconds.
+        data = self.ie._issue_token(self.video_id, note=False)
         self._store(data['token'], data['username'], data['expireAt'])
         self.ie.write_debug(f'Stream token refreshed (expires at {int(self.expires)})')
 
