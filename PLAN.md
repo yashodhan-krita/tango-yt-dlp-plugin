@@ -177,6 +177,13 @@ recording stalls. The extractor appends `127.0.0.1` and `localhost` to
 spellings because ffmpeg reads the lowercase one while other tools read the
 uppercase. API and CDN traffic keeps using the proxy.
 
+That environment variable covers ffmpeg only. Under `--proxy`, yt-dlp's own
+proxy map is `{'all': proxy}` with no `'no'` key, and `select_proxy`
+consults `no_proxy` only when `'no'` is present; its fetch of the relay's
+master playlist would be tunnelled through a proxy that cannot reach this
+machine. That fetch is made with `Request(url, proxies={'all':
+'__noproxy__'})` instead. The relay's CDN fetches still use the proxy.
+
 ## Measurements
 
 - Token budget: 400 token calls in 188 s and 200 check-in+token rounds in
