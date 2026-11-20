@@ -219,10 +219,15 @@ class ExtractionTest(unittest.TestCase):
         routes[('GET', 'www.tango.me',
                 '/api/visitors/profilealias/api/alias/convert')] = Reply(
                     b'', status=404)
+        routes[('GET', 'www.tango.me', f'/{ACCOUNT_ID}')] = fixture_reply(
+            'profile_page_account.html',
+            headers=(('Content-Type', 'text/html; charset=utf-8'),))
         ydl = make_downloader(routes)
         info = TangoIE(ydl)._real_extract(
             f'https://www.tango.me/profile/{ACCOUNT_ID}')
         self.assertEqual(info['id'], STREAM_ID)
+        self.assertEqual(info['channel_id'], ACCOUNT_ID)
+        self.assertEqual(info['channel_follower_count'], 1234)
         lookups = requests_to(ydl, '/stream/v1/id')
         self.assertEqual(len(lookups), 1)
         self.assertIn(f'broadcasterId={ACCOUNT_ID}', lookups[0].url)
@@ -238,6 +243,81 @@ class ExtractionTest(unittest.TestCase):
                 f'https://www.tango.me/@{ALIAS}')
         self.assertIn(ALIAS, str(ctx.exception))
         self.assertIn('--wait-for-video', str(ctx.exception))
+
+    def test_the_wait_hint_is_not_repeated_when_already_waiting(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me',
+                '/api/showroom-streams/api/public/stream/v1/id')] = Reply(
+                    b'', status=404)
+        with self.assertRaises(UserNotLive) as ctx:
+            TangoIE(make_downloader(
+                routes, {'wait_for_video': (15, None)}))._real_extract(
+                    f'https://www.tango.me/@{ALIAS}')
+        self.assertNotIn('--wait-for-video', str(ctx.exception))
+
+    def test_a_404_error_page_is_not_taken_as_an_id(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me',
+                '/api/visitors/profilealias/api/alias/convert')] = Reply(
+                    b'<html>bad gateway</html>')
+        with self.assertRaises(ExtractorError) as ctx:
+            TangoIE(make_downloader(routes))._resolve_stream_id('nobody')
+        self.assertIn('No tango.me profile found', str(ctx.exception))
+
+    def test_a_percent_encoded_alias_is_decoded(self):
+        info = TangoIE(make_downloader(base_routes()))._real_extract(
+            f'https://www.tango.me/%40{ALIAS}')
+        self.assertEqual(info['id'], STREAM_ID)
+        self.assertEqual(info['uploader_id'], ALIAS)
+
+    def test_a_terminated_profile_waits_instead_of_downloading(self):
+        routes = base_routes()
+        routes[('POST', 'www.tango.me',
+                f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = (
+                    fixture_reply('watch_terminated.json'))
+        with self.assertRaises(UserNotLive) as ctx:
+            TangoIE(make_downloader(routes))._real_extract(
+                f'https://www.tango.me/@{ALIAS}')
+        self.assertIn(ALIAS, str(ctx.exception))
+
+    def test_an_ended_profile_waits_instead_of_downloading(self):
+        routes = base_routes()
+        doc = json.loads(fixture('watch.json'))
+        doc['details']['stream']['status'] = 'ENDED'
+        routes[('POST', 'www.tango.me',
+                f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = Reply(
+                    json.dumps(doc).encode(),
+                    headers=(('Content-Type', 'application/json'),))
+        with self.assertRaises(UserNotLive) as ctx:
+            TangoIE(make_downloader(routes))._real_extract(
+                f'https://www.tango.me/@{ALIAS}')
+        self.assertIn(ALIAS, str(ctx.exception))
+
+    def test_a_graph_profile_page_and_a_zero_follower_count(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me', f'/{ALIAS}')] = Reply(
+            b'<script type="application/ld+json">{"@graph": [{"@type": '
+            b'"ProfilePage", "mainEntity": {"@type": "Person", "name": '
+            b'"Zero Follower", "identifier": "tango_tester", '
+            b'"interactionStatistic": [{"interactionType": '
+            b'"https://schema.org/FollowAction", "userInteractionCount": '
+            b'"0"}]}}]}</script>',
+            headers=(('Content-Type', 'text/html; charset=utf-8'),))
+        info = TangoIE(make_downloader(routes))._real_extract(
+            f'https://www.tango.me/@{ALIAS}')
+        self.assertEqual(info['uploader'], 'Zero Follower')
+        self.assertEqual(info['channel_follower_count'], 0)
+
+    def test_a_persistent_token_failure_is_loud(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me',
+                '/api/stream/token-data/v1/web/visitor')] = Reply(
+                    b'busy', status=503)
+        with self.assertRaises(ExtractorError) as ctx:
+            TangoIE(make_downloader(
+                routes, {'no_warnings': True}))._real_extract(
+                    f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertIn('did not issue a CDN token', str(ctx.exception))
 
     def test_the_account_session_survives_the_check_in(self):
         ydl = make_downloader(base_routes())

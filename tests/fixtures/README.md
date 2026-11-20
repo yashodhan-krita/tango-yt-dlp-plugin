@@ -22,6 +22,8 @@ file.
 | `alias_convert.txt` | `GET https://www.tango.me/api/visitors/profilealias/api/alias/convert?alias=tango_tester` | — |
 | `stream_id.txt` | `GET https://www.tango.me/api/showroom-streams/api/public/stream/v1/id?broadcasterId=GGGGHHHHIIIIJJJJKKKKLL` | — |
 | `profile.html` | `GET https://www.tango.me/stream/AAAABBBBCCCCDDDDEEEEFF` | — |
+| `profile_page.html` | `GET https://www.tango.me/tango_tester` | — |
+| `profile_page_account.html` | `GET https://www.tango.me/GGGGHHHHIIIIJJJJKKKKLL` | — |
 | `feed.json` | `POST https://www.tango.me/api/showroom-streams/api/public/web/catalog/v1?traceId=<uuid>` | `{"size":30,"platform":"web_desktop","hMarketingCampaign":false}` |
 | `master.m3u8` | `GET https://cinema-in41.tango.me/v2/11111111111111111111111111111111/master.m3u8` | — |
 | `hd.m3u8` | `GET https://cinema-in41.tango.me/v2/22222222222222222222222222222222/hd.m3u8` | — |
@@ -36,7 +38,12 @@ terminated stream and an audio room both answer the same watch call, but the
 capture session predates this fixture set, so their bodies are reconstructed
 from the documented failure modes.  The remaining rows (`check_in.json`,
 `token.json`, `watch_wrong_id.json`, `alias_convert.txt`, `stream_id.txt`,
-`profile.html`, `feed.json`, `master.m3u8`, `hd.m3u8`, `ld.m3u8`) are
-likewise reconstructed from the shapes recorded in `PLAN.md` (and, for
-`profile.html`, the page the extractor parses) rather than captured fresh.
-`alias_convert.txt` and `stream_id.txt` carry no trailing newline.
+`profile.html`, `profile_page.html`, `profile_page_account.html`,
+`feed.json`, `master.m3u8`, `hd.m3u8`, `ld.m3u8`) are likewise reconstructed
+from the shapes recorded in `PLAN.md` (and, for the two profile pages, the
+pages the extractor parses) rather than captured fresh.  `profile.html` is a
+stream page (the name predates profile tracking); the `profile_page` fixtures
+mirror the three-block JSON-LD the live site serves (Organization, WebSite,
+ProfilePage) on a bare alias or account-id URL.  `profile_page_account.html`
+is the same page addressed by account id, where `identifier` is the account
+id.  `alias_convert.txt` and `stream_id.txt` carry no trailing newline.

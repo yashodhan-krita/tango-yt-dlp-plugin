@@ -79,6 +79,20 @@ def relay_with(outcomes):
         refresher, 'https://cinema-in41.tango.me/v2/x/master.m3u8'), refresher
 
 
+class PathValidationTest(unittest.TestCase):
+    def test_only_origin_form_paths_reach_upstream(self):
+        relay, refresher = relay_with([MASTER])
+        try:
+            for path in ('@evil.example/x', '//evil.example/x',
+                         'https://evil.example/x'):
+                with self.subTest(path):
+                    status, _, _ = relay.fetch(path)
+                    self.assertEqual(status, 400)
+            self.assertEqual(refresher.ie._downloader.requests, [])
+        finally:
+            relay.close()
+
+
 def playlist_response(body):
     headers = email.message.Message()
     headers.add_header('Content-Type', 'application/vnd.apple.mpegurl')

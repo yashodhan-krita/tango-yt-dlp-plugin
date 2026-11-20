@@ -36,22 +36,29 @@ class StreamUrlTest(unittest.TestCase):
         for url in ('https://www.tango.me/stream/',
                     'https://www.tango.me/profile/',
                     'https://www.tango.me/search',
-                    'https://www.tango.me/live'):
+                    'https://www.tango.me/live',
+                    'https://www.tango.me/settings/privacy',
+                    'https://www.tango.me/store/x',
+                    'https://www.tango.me/live/profile'):
             self.assertFalse(TangoIE.suitable(url), url)
 
     def test_profile_and_stream_forms_are_told_apart(self):
+        def kind(url):
+            match = TangoIE._match_valid_url(url)
+            return match.group('kind') if match else None
+
         account = f'https://www.tango.me/profile/{ACCOUNT_ID}'
         self.assertTrue(TangoIE.suitable(account))
         self.assertEqual(TangoIE._match_valid_url(account).group('id'), ACCOUNT_ID)
-        self.assertTrue(TangoIE._is_profile_url(account))
+        self.assertEqual(kind(account), 'profile')
         for url in (f'https://www.tango.me/stream/{ACCOUNT_ID}',
                     f'https://www.tango.me/live/{ACCOUNT_ID}',
                     f'https://m.tango.me/stream/{ACCOUNT_ID}'):
-            self.assertFalse(TangoIE._is_profile_url(url), url)
+            self.assertIn(kind(url), ('stream', 'live'), url)
         for url in (f'https://www.tango.me/{ACCOUNT_ID}',
                     f'https://www.tango.me/@{ACCOUNT_ID}',
                     f'https://www.tango.me/profile/{ACCOUNT_ID}'):
-            self.assertTrue(TangoIE._is_profile_url(url), url)
+            self.assertNotIn(kind(url), ('stream', 'live'), url)
 
 
 class FeedUrlTest(unittest.TestCase):

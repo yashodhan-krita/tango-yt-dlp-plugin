@@ -77,7 +77,10 @@ class TangoTokenRefresher:
         self.username = None
         self._token = None
         self._lock = threading.Lock()
-        self._refreshing = False
+
+    @property
+    def token(self):
+        return self._token
 
     def _store(self, token, username, expires):
         self._token, self.username, self.expires = token, username, float(expires)
@@ -95,17 +98,12 @@ class TangoTokenRefresher:
 
     def ensure(self, force=False):
         with self._lock:
-            if self._refreshing:
-                return
             if not force and time.time() < self.expires - self.MARGIN:
                 return
-            self._refreshing = True
             try:
                 self.refresh()
             except Exception as err:  # noqa: BLE001 - never break a request over this
                 self.ie.report_warning(f'Could not refresh stream token: {err}')
-            finally:
-                self._refreshing = False
 
 
 # What ffmpeg gets once the CDN has thrown the real media playlist away:
@@ -277,6 +275,8 @@ class _MediaWindow:
 
 class _TangoRelayHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
+    # A stalled ffmpeg request must not hold a handler thread forever.
+    timeout = 30
 
     def _respond(self, send_body):
         try:
@@ -362,6 +362,8 @@ class TangoHlsRelay:
         self._cache = {}
         self._served = set()
         self._windows = {}
+        self._state = threading.RLock()
+        self._closed = threading.Event()
         self._warned_stale = False
         self._warned_ended = False
         self._server = _TangoRelayServer(('127.0.0.1', 0), _TangoRelayHandler)
@@ -376,6 +378,7 @@ class TangoHlsRelay:
         return f'http://127.0.0.1:{self.port}{self.master_path}'
 
     def close(self):
+        self._closed.set()
         try:
             self._server.shutdown()
             self._server.server_close()
@@ -383,15 +386,20 @@ class TangoHlsRelay:
             pass
 
     def _reap(self):
-        while True:
-            time.sleep(60)
+        while not self._closed.wait(60):
             if time.time() - self._last_request > self.IDLE_TIMEOUT:
                 self.close()
                 return
 
     def fetch(self, path):
+        # An origin-form path is the only shape this relay serves.  Anything
+        # else (absolute-form, or an '@' authority) would be concatenated onto
+        # the upstream host and could carry the token cookie elsewhere.
+        if not path.startswith('/') or path.startswith('//'):
+            return 400, 'text/plain', b'bad request path\n'
         self._last_request = time.time()
-        cached = self._cache.get(path)
+        with self._state:
+            cached = self._cache.get(path)
         # A playlist this relay already ended stays ended: the CDN would only
         # answer 404 again, so ffmpeg is served from the cache.
         if cached and b'#EXT-X-ENDLIST' in cached[0]:
@@ -423,17 +431,21 @@ class TangoHlsRelay:
                 # the stream is over: end the recording instead of failing it.
                 # Checked before the retry decision, so an ended stream does
                 # not burn a token refresh.
-                if err.status in (404, 410) and path in self._served:
-                    body = _end_playlist(
-                        cached[0] if cached else _ENDED_MEDIA_PLAYLIST)
-                    self._cache[path] = (
-                        body, 'application/vnd.apple.mpegurl', time.time())
-                    if not self._warned_ended:
-                        self.refresher.ie.report_warning(
-                            'The stream has ended (the CDN answered 404); '
-                            'finishing the recording')
-                        self._warned_ended = True
-                    return 200, 'application/vnd.apple.mpegurl', body
+                if err.status in (404, 410):
+                    with self._state:
+                        served = path in self._served
+                    if served:
+                        body = _end_playlist(
+                            cached[0] if cached else _ENDED_MEDIA_PLAYLIST)
+                        with self._state:
+                            self._cache[path] = (
+                                body, 'application/vnd.apple.mpegurl', time.time())
+                        if not self._warned_ended:
+                            self.refresher.ie.report_warning(
+                                'The stream has ended (the CDN answered 404); '
+                                'finishing the recording')
+                            self._warned_ended = True
+                        return 200, 'application/vnd.apple.mpegurl', body
                 if err.status not in (401, 403, 500, 502, 503, 504):
                     raise
             except TransportError as err:
@@ -458,12 +470,13 @@ class TangoHlsRelay:
             raise last_error
 
         self._warned_stale = False
-        self._served.add(path)
 
-        if body.lstrip().startswith(b'#EXTM3U'):
-            body = self._rewrite_playlist(body, url, path)
-            content_type = 'application/vnd.apple.mpegurl'
-        self._cache[path] = (body, content_type, time.time())
+        with self._state:
+            self._served.add(path)
+            if body.lstrip().startswith(b'#EXTM3U'):
+                body = self._rewrite_playlist(body, url, path)
+                content_type = 'application/vnd.apple.mpegurl'
+            self._cache[path] = (body, content_type, time.time())
         return 200, content_type, body
 
     def _merge_media_playlist(self, path, text):
@@ -472,10 +485,11 @@ class TangoHlsRelay:
         Only for media playlists; the caller keeps masters on their own
         rewrite path because their entries are variants, not segments.
         """
-        window = self._windows.get(path)
-        if window is None:
-            window = self._windows[path] = _MediaWindow(self.PLAYLIST_WINDOW)
-        return window.merge(text)
+        with self._state:
+            window = self._windows.get(path)
+            if window is None:
+                window = self._windows[path] = _MediaWindow(self.PLAYLIST_WINDOW)
+            return window.merge(text)
 
     def _rewrite_playlist(self, body, upstream_url, path=None):
         """Point ffmpeg at the CDN for segments, at the relay for playlists.
@@ -668,25 +682,59 @@ class TangoBase(InfoExtractor):
 
     # -------------------------------------------------------------- resolving
 
+    @staticmethod
+    def _id_from_body(body):
+        """Accept a response body only when it is shaped like a tango id.
+
+        The lookups answer 404 with whatever the gateway or CDN sent; an HTML
+        error page must read as "no profile" rather than travel on as if it
+        were an id.
+        """
+        body = (body or '').strip()
+        return body if re.fullmatch(_STREAM_ID_RE, body) else ''
+
+    def _not_live(self, label, account_id=None):
+        """A ``UserNotLive`` that says what to do about it.
+
+        The hint is omitted when the caller already asked yt-dlp to wait, so
+        the per-cycle warning does not repeat instructions back at them.
+        """
+        note = ''
+        if account_id and account_id != label:
+            note = f' (account {account_id})'
+        elif account_id and re.fullmatch(_STREAM_ID_RE, label):
+            # A 22-char value that the alias lookup rejected is used as the
+            # account id; saying so turns a typo into a diagnosable answer.
+            note = ' (treated as an account id)'
+        hint = '' if self.get_param('wait_for_video') else (
+            '; retry with --wait-for-video 60 to wait for it')
+        return UserNotLive(
+            f'tango.me profile "{label}" is not live{note}{hint}',
+            video_id=label)
+
     def _resolve_stream_id(self, alias_or_id, *, is_profile=False):
-        """Resolve an identifier to the broadcaster's current live stream.
+        """Resolve an identifier to its current live stream.
+
+        Returns ``(stream_id, account_id)``.  A profile page accepts either
+        the alias or the 22-char account id, so the account id is returned
+        for metadata lookup even when the URL carried the alias.
 
         A stream URL carries a 22-char stream id; a profile URL carries an
         alias or, just as validly, the 22-char account id from the site's own
         profile data.  The two id shapes are indistinguishable, so the URL form
         decides: ``is_profile`` never reads its identifier as a stream id.
         """
-        identifier = (alias_or_id or '').lstrip('@')
+        identifier = urllib.parse.unquote(alias_or_id or '').lstrip('@')
         if not is_profile and re.fullmatch(_STREAM_ID_RE, identifier):
-            return identifier
+            return identifier, None
         # A rejected alias or an offline broadcaster answers 404, which is a
         # semantic answer rather than a transport failure: accept it so the
         # retry budget is not spent on it.
-        account_id = (self._retry(lambda: self._download_webpage(
+        account_id = self._id_from_body(self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/visitors/profilealias/api/alias/convert',
             identifier, note='Resolving profile alias',
             query={'alias': identifier}, fatal=True, expected_status=404,
-            headers=self._api_headers())) or '').strip()
+            headers=self._api_headers())))
         if not account_id and is_profile and re.fullmatch(
                 _STREAM_ID_RE, identifier):
             # Profile pages accept the account id directly; there is no alias
@@ -695,21 +743,16 @@ class TangoBase(InfoExtractor):
         if not account_id:
             raise ExtractorError(
                 f'No tango.me profile found for "{identifier}"', expected=True)
-        stream_id = (self._retry(lambda: self._download_webpage(
+        stream_id = self._id_from_body(self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/showroom-streams/api/public/stream/v1/id',
             identifier, note='Looking for a live stream',
             query={'broadcasterId': account_id}, fatal=True,
-            expected_status=404, headers=self._api_headers())) or '').strip()
+            expected_status=404, headers=self._api_headers())))
         if not stream_id:
-            account_note = '' if identifier == account_id else (
-                f' (account {account_id})')
-            raise UserNotLive(
-                f'tango.me profile "{identifier}" is not live{account_note}; '
-                'retry with --wait-for-video 60 to wait for it',
-                video_id=identifier)
-        return stream_id
+            raise self._not_live(identifier, account_id)
+        return stream_id, account_id
 
-    def _watch(self, stream_id):
+    def _watch(self, stream_id, *, profile=None):
         """Register as a viewer and return the stream document.
 
         This call is what authorises the CDN; without it the playlists answer
@@ -731,6 +774,11 @@ class TangoBase(InfoExtractor):
             raise ExtractorError('tango.me stream lookup failed', expected=True)
         code = data.get('code')
         if code != 'OK' or not data.get('details', {}).get('stream'):
+            # A profile can point at the stream that just ended.  For a
+            # profile URL that means "not live now", so --wait-for-video can
+            # re-resolve; a stream URL keeps the explicit "has ended" answer.
+            if profile and code == 'FAILED_TERMINATED':
+                raise self._not_live(profile)
             raise ExtractorError(
                 (_WATCH_ERRORS.get(code) if isinstance(code, str) else None)
                 or f'tango.me returned {code or "no data"}',
@@ -756,28 +804,32 @@ class TangoBase(InfoExtractor):
             url, video_id, note=note, fatal=False) or ''
         title = self._og_search_property('title', html, default='') or ''
         name = profile_alias = description = thumbnail = followers = None
-        for block in re.findall(
-                r'<script[^>]+type="application/ld\+json"[^>]*>\s*(.*?)\s*</script>',
-                html, re.DOTALL):
-            try:
-                data = json.loads(block)
-            except json.JSONDecodeError:
-                continue
-            entity = data.get('mainEntity') if isinstance(data, dict) else None
-            if not isinstance(entity, dict):
-                continue
-            profile_alias = entity.get('identifier') or profile_alias
-            name = entity.get('name') or name
-            description = entity.get('description') or description
-            thumbnail = url_or_none(entity.get('image')) or thumbnail
-            for stat in entity.get('interactionStatistic') or []:
-                if isinstance(stat, dict) and 'FollowAction' in str(
-                        stat.get('interactionType')):
-                    followers = int_or_none(
-                        stat.get('userInteractionCount')) or followers
+        for data in self._yield_json_ld(html, video_id, default=None):
+            items = data.get('@graph')
+            items = items if isinstance(items, list) else [data]
+            for item in items:
+                main = item.get('mainEntity') if isinstance(item, dict) else None
+                for entity in main if isinstance(main, list) else [main]:
+                    if not isinstance(entity, dict):
+                        continue
+                    if isinstance(entity.get('identifier'), str):
+                        profile_alias = entity['identifier'] or profile_alias
+                    if isinstance(entity.get('name'), str):
+                        name = entity['name'] or name
+                    if isinstance(entity.get('description'), str):
+                        description = entity['description'] or description
+                    if isinstance(entity.get('image'), str):
+                        thumbnail = url_or_none(entity['image']) or thumbnail
+                    for stat in entity.get('interactionStatistic') or []:
+                        if isinstance(stat, dict) and 'FollowAction' in str(
+                                stat.get('interactionType')):
+                            count = int_or_none(
+                                stat.get('userInteractionCount'))
+                            if count is not None:
+                                followers = count
         match = re.search(r'\(@([^)\s]+)\)', title)
         if match:
-            profile_alias = match.group(1)
+            profile_alias = profile_alias or match.group(1)
             # The title carries the display name as the site renders it,
             # including emoji the schema.org name may have dropped.
             name = re.sub(r'\s*\(@[^)]*\).*$', '', title).strip() or name
@@ -822,26 +874,16 @@ class TangoBase(InfoExtractor):
 
     # ---------------------------------------------------------------- shared
 
-    @staticmethod
-    def _is_profile_url(url):
-        """Whether a matched URL names a profile rather than a stream.
-
-        ``/stream/<x>`` and ``/live/<x>`` carry a stream id.  A bare alias,
-        ``@alias`` and ``/profile/<x>`` all identify the broadcaster, and the
-        identifier may be either an alias or a 22-char account id.
-        """
-        first = urllib.parse.urlparse(url).path.lstrip('/').split('/', 1)[0]
-        return first not in ('stream', 'live')
-
     def _extract_stream(self, url, video_id, is_profile=False):
         self._ensure_session(video_id)
-        alias_hint = (video_id or '').lstrip('@') if is_profile else None
-        if alias_hint and re.fullmatch(_STREAM_ID_RE, alias_hint):
-            # A profile URL may carry the opaque account id instead of an alias.
-            alias_hint = None
-        stream_id = self._resolve_stream_id(video_id, is_profile=is_profile)
+        # A profile URL identifies the broadcaster, by alias or account id;
+        # either form is a profile page, so it supplies name and followers.
+        profile_label = (urllib.parse.unquote(video_id or '').lstrip('@')
+                         if is_profile else None)
+        stream_id, account_id = self._resolve_stream_id(
+            video_id, is_profile=is_profile)
 
-        data = self._watch(stream_id)
+        data = self._watch(stream_id, profile=profile_label)
         details = data.get('details') or {}
         stream = details.get('stream') or {}
         settings = details.get('settings') or {}
@@ -851,6 +893,11 @@ class TangoBase(InfoExtractor):
         status = stream.get('status') or ''
         is_live = status == 'LIVING'
         if not is_live:
+            # A profile URL always means "the current live stream", so an
+            # ended stream becomes a wait (--wait-for-video re-resolves the
+            # alias).  A stream URL may still want its finished recording.
+            if is_profile:
+                raise self._not_live(profile_label)
             complete = stream.get('completeListUrl')
             if not complete:
                 raise UserNotLive(video_id=stream_id)
@@ -858,12 +905,16 @@ class TangoBase(InfoExtractor):
                 f'Stream is not live (status: {status or "unknown"}); '
                 'falling back to the complete recording')
 
-        profile = self._profile_metadata(stream_id, alias=alias_hint)
-        alias = profile.get('alias') or alias_hint
+        profile = self._profile_metadata(stream_id, alias=profile_label)
+        alias = profile.get('alias') or profile_label
         name = profile.get('name') or alias or stream_id
 
         refresher = TangoTokenRefresher(self, stream_id)
         refresher.ensure(force=True)
+        if not refresher.token:
+            raise ExtractorError(
+                'tango.me did not issue a CDN token; retry the download',
+                expected=True)
 
         master_url = (
             traverse_obj(hls_info, 'masterUrl')
@@ -877,10 +928,10 @@ class TangoBase(InfoExtractor):
         if refresher.username:
             master_url = f'{master_url}&username={refresher.username}'
         relay = TangoHlsRelay(refresher, master_url)
-        _exempt_loopback_from_proxy()
         # The relay must keep serving ffmpeg when extraction succeeds, so it is
         # only closed here when we are about to leave without returning.
         try:
+            _exempt_loopback_from_proxy()
             formats, subtitles = self._hls_formats(
                 relay.url(), stream_id, live=is_live)
             if not formats:
@@ -909,12 +960,18 @@ class TangoBase(InfoExtractor):
             'live_status': 'is_live' if is_live else 'was_live',
             'uploader': name,
             'uploader_id': alias,
+            'display_id': alias,
             'channel': name,
             'channel_id': traverse_obj(
                 details, ('anchor', 'encryptedAccountId'))
-            or traverse_obj(stream, 'encryptedAccountId'),
-            'channel_url': f'https://www.tango.me/{alias}' if alias else None,
-            'uploader_url': f'https://www.tango.me/{alias}' if alias else None,
+            or traverse_obj(stream, 'encryptedAccountId')
+            or account_id,
+            'channel_url': (
+                f'https://www.tango.me/{urllib.parse.quote(alias, safe="")}'
+                if alias else None),
+            'uploader_url': (
+                f'https://www.tango.me/{urllib.parse.quote(alias, safe="")}'
+                if alias else None),
             'webpage_url': url,
             'thumbnail': traverse_obj(stream, 'thumbnail') or profile.get('thumbnail'),
             'description': profile.get('description'),
@@ -974,9 +1031,9 @@ class TangoIE(TangoBase):
     IE_NAME = 'tango'
     _VALID_URL = (
         r'https?://(?:www\.|m\.)?tango\.me/'
-        r'(?:(?:stream|live|profile)/)?'
+        r'(?:(?P<kind>stream|live|profile)/)?'
         r'(?!(?:live|stream|profile|search|explore|login|signup|gifts|store|settings|wallet)'
-        r'/?(?:[?#]|$))'
+        r'(?:[/?#]|$))'
         r'(?P<id>[^/?#&]+)')
     _TESTS = [{
         'url': 'https://www.tango.me/stream/jBLKPPFpEsXV2S2C7nC39A',
@@ -989,8 +1046,19 @@ class TangoIE(TangoBase):
     }, {
         'url': 'https://www.tango.me/wisdomhood',
         'only_matching': True,
+    }, {
+        'url': 'https://www.tango.me/@wisdomhood',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.tango.me/profile/wisdomhood',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.tango.me/live/jBLKPPFpEsXV2S2C7nC39A',
+        'only_matching': True,
     }]
 
     def _real_extract(self, url):
+        match = self._match_valid_url(url)
         return self._extract_stream(
-            url, self._match_id(url), is_profile=self._is_profile_url(url))
+            url, match.group('id'),
+            is_profile=match.group('kind') not in ('stream', 'live'))
