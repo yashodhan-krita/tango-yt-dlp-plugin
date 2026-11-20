@@ -167,8 +167,8 @@ rather than the recording failing.
 - `Could not refresh stream token … 403` — the token endpoint refused. The
   extractor retries with a fresh visitor identity and keeps replaying the last
   playlist for two minutes before ending the file cleanly.
-- `Stream unavailable (FAILED_TERMINATED)` — the stream has ended; only live
-  streams carry an HLS URL.
+- `The stream has ended` — tango removed the stream from every route; only
+  live streams carry an HLS URL.
 - Recording stalls behind a proxy — the plugin already exempts the loopback
   relay from it, so a stall means the proxy is failing the CDN traffic
   itself.
@@ -195,4 +195,6 @@ PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/*/libexec/bin/python -m unittest discov
 - `tests/test_session.py` — visitor token / identity-reset tests
 - `tests/test_urls.py` — URL routing tests
 - `install.sh` — plugin-dir installer
+- `docs/kb/tango-me.md` — technical knowledge base: contract, failure modes,
+  measurements, traps
 - `tango_chat_recorder.py` — experimental chat-to-SRT tool (see its header)
