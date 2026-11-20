@@ -147,15 +147,31 @@ class UpstreamRequestTest(unittest.TestCase):
 
 class ThrottlingFallbackTest(unittest.TestCase):
     def test_replays_last_playlist_when_the_token_is_throttled(self):
-        relay, _ = relay_with([_throttled(), _throttled()])
+        relay, refresher = relay_with([_throttled(), _throttled()])
         self.addCleanup(relay.close)
         path = relay.master_path
-        relay._cache[path] = (b'#EXTM3U\n#EXT-X-ENDLIST\n',
-                               'application/vnd.apple.mpegurl', time.time())
+        cached = b'#EXTM3U\n#EXTINF:1.0,\nhttps://cdn/1.ts\n'
+        relay._cache[path] = (cached, 'application/vnd.apple.mpegurl', time.time())
         with mock.patch('time.sleep'):
             status, _, body = relay.fetch(path)
         self.assertEqual(status, 200)
-        self.assertEqual(body, b'#EXTM3U\n#EXT-X-ENDLIST\n')
+        self.assertEqual(body, cached)
+        # Both throttled replies were consumed, so the mid-window replay
+        # branch served the cache (not the early-ENDLIST short-circuit).
+        self.assertEqual(len(refresher.ie._downloader.requests), 2)
+        refresher.ie.report_warning.assert_called_once()
+        self.assertIn('throttled', refresher.ie.report_warning.call_args[0][0])
+
+    def test_an_ended_cached_playlist_is_served_without_an_upstream_request(self):
+        relay, refresher = relay_with([MASTER])
+        self.addCleanup(relay.close)
+        path = relay.master_path
+        ended = b'#EXTM3U\n#EXT-X-ENDLIST\n'
+        relay._cache[path] = (ended, 'application/vnd.apple.mpegurl', time.time())
+        status, _, body = relay.fetch(path)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, ended)
+        self.assertEqual(len(refresher.ie._downloader.requests), 0)
 
     def test_raises_when_throttled_without_a_cached_playlist(self):
         relay, _ = relay_with([_throttled(), _throttled()])

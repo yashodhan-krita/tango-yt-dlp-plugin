@@ -176,7 +176,9 @@ rather than the recording failing.
 ## Tests
 
 The relay logic (playlist rewriting, throttle replay) and the visitor-session
-rules are covered offline. Run the suite with the interpreter that ships with
+rules are covered offline, and the extractor itself runs end to end against a
+fake transport, so extraction, relay wiring and failure paths are tested
+without the network. Run the suite with the interpreter that ships with
 yt-dlp:
 
 ```sh
@@ -187,6 +189,9 @@ PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/*/libexec/bin/python -m unittest discov
 
 - `yt_dlp_plugins/extractor/tango.py` — the extractor and relay
 - `tests/test_relay.py` — offline relay tests
+- `tests/test_extract.py` — end-to-end extraction through the real extractor
+  with a fake transport
+- `tests/fake_net.py` — the fake transport handler those tests run on
 - `tests/test_session.py` — visitor token / identity-reset tests
 - `tests/test_urls.py` — URL routing tests
 - `install.sh` — plugin-dir installer

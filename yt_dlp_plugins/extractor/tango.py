@@ -542,7 +542,8 @@ class TangoBase(InfoExtractor):
         code = data.get('code')
         if code != 'OK' or not data.get('details', {}).get('stream'):
             raise ExtractorError(
-                _WATCH_ERRORS.get(code) or f'tango.me returned {code or "no data"}',
+                (_WATCH_ERRORS.get(code) if isinstance(code, str) else None)
+                or f'tango.me returned {code or "no data"}',
                 expected=True)
         return data
 
@@ -635,15 +636,21 @@ class TangoBase(InfoExtractor):
             master_url = f'{master_url}&username={refresher.username}'
         relay = TangoHlsRelay(refresher, master_url)
         _exempt_loopback_from_proxy()
-        formats, subtitles = self._hls_formats(
-            relay.url(), stream_id, live=is_live)
-        if not formats:
-            kind = 'live stream' if is_live else 'recording'
-            raise ExtractorError(
-                f'The {kind} HLS manifest could not be read. '
-                'For a followers-only or private stream retry with '
-                '--cookies-from-browser chrome',
-                expected=True)
+        # The relay must keep serving ffmpeg when extraction succeeds, so it is
+        # only closed here when we are about to leave without returning.
+        try:
+            formats, subtitles = self._hls_formats(
+                relay.url(), stream_id, live=is_live)
+            if not formats:
+                kind = 'live stream' if is_live else 'recording'
+                raise ExtractorError(
+                    f'The {kind} HLS manifest could not be read. '
+                    'For a followers-only or private stream retry with '
+                    '--cookies-from-browser chrome',
+                    expected=True)
+        except BaseException:
+            relay.close()
+            raise
 
         title = f'{name} (@{alias})' if alias and alias != name else name
         if is_live:

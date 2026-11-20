@@ -20,10 +20,12 @@ from yt_dlp.utils import ExtractorError
 
 from yt_dlp_plugins.extractor.tango import (
     TangoFeedIE,
+    TangoHlsRelay,
     TangoIE,
     _exempt_loopback_from_proxy,
 )
 
+from tests import fake_net
 from tests.fake_net import (
     ALIAS,
     STREAM_ID,
@@ -121,6 +123,43 @@ class ExtractionTest(unittest.TestCase):
             TangoIE(make_downloader(routes))._watch(STREAM_ID)
         self.assertIn('--cookies-from-browser chrome', str(ctx.exception))
         self.assertTrue(ctx.exception.expected)
+
+    def test_a_non_string_code_still_explains_itself(self):
+        routes = base_routes()
+        doc = json.loads(fixture('watch.json'))
+        doc['code'] = {'FAILED': True}
+        routes[('POST', 'www.tango.me', f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')] = Reply(
+            json.dumps(doc).encode(),
+            headers=(('Content-Type', 'application/json'),))
+        with self.assertRaises(ExtractorError) as ctx:
+            TangoIE(make_downloader(routes))._watch(STREAM_ID)
+        self.assertIn('tango.me returned', str(ctx.exception))
+        self.assertTrue(ctx.exception.expected)
+
+    def test_the_relay_is_closed_when_the_manifest_cannot_be_read(self):
+        routes = base_routes()
+        routes[('GET', fake_net.CDN,
+                f'/v2/{fake_net._MASTER_HASH}/master.m3u8')] = Reply(
+            b'not a playlist',
+            headers=(('Content-Type', 'text/plain'),))
+
+        # Patch the class the extractor actually calls, not the module path:
+        # yt-dlp's plugin loader can replace the module object in sys.modules,
+        # which leaves a string patch target pointing at a different class.
+        original_close = TangoHlsRelay.close
+        closed = []
+
+        def close(relay):
+            closed.append(relay)
+            original_close(relay)
+
+        with mock.patch.object(TangoHlsRelay, 'close', close):
+            with self.assertRaises(ExtractorError) as ctx:
+                TangoIE(make_downloader(routes))._real_extract(
+                    f'https://www.tango.me/stream/{STREAM_ID}')
+        self.assertIn('manifest could not be read', str(ctx.exception))
+        self.assertTrue(ctx.exception.expected)
+        self.assertEqual(len(closed), 1)
 
     def test_a_stream_extracts_from_the_fixtures(self):
         info = TangoIE(make_downloader(base_routes()))._real_extract(
