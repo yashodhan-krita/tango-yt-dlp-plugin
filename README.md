@@ -53,8 +53,26 @@ yt-dlp --flat-playlist "https://www.tango.me/live"
 Wait for an offline profile to go live:
 
 ```sh
-yt-dlp --wait-for-video 60 -f 1 "https://www.tango.me/<alias>"
+yt-dlp --wait-for-video 60 -f 1 "https://www.tango.me/@<alias>"
 ```
+
+Every retry resolves the profile again, so the stream id that appears later is
+found even though the profile had none at the start. To track someone across
+separate broadcasts, loop it with an archive so finished streams are not
+downloaded twice:
+
+```sh
+while :; do
+    yt-dlp --wait-for-video 60 --download-archive ~/.cache/tango-archive.txt \
+        -f 1 "https://www.tango.me/@<alias>" || true
+    sleep 30
+done
+```
+
+Profile URLs accept an alias, `@alias`, `/profile/<alias>`, or the site's
+22-char account id (`/profile/<account-id>`). The extractor reads the public
+profile page for the display name, avatar, bio and follower count instead of
+guessing them from the stream title.
 
 Stop a recording with Ctrl-C. yt-dlp finalises the file and MP4-fixes it.
 

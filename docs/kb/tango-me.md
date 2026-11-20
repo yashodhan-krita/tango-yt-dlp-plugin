@@ -8,10 +8,10 @@ record; `README.md` is for users.
 ## What this covers
 
 `yt-dlp` records tango.me live streams through a plugin. It accepts a stream
-id, a profile alias, `@alias`, `/profile/<alias>`, and the `/live` feed.
-It works anonymously, or with `--cookies-from-browser chrome` for
-followers-only streams. Output is H.264 + AAC in MP4; the video bytes never
-pass through Python.
+id, a profile alias, `@alias`, `/profile/<alias>`, `/profile/<account-id>`,
+and the `/live` feed. It works anonymously, or with
+`--cookies-from-browser chrome` for followers-only streams. Output is
+H.264 + AAC in MP4; the video bytes never pass through Python.
 
 ## The two facts everything follows from
 
@@ -96,6 +96,47 @@ segment must still be within 70 s of its appearance when ffmpeg asks for it.
 | `FAILED_BAD_REQUEST` | Lookup refused | Audio rooms are the known case |
 
 A wrong id is never a retry. Treat 200-with-code as the answer.
+
+## Profiles and tracking
+
+The URL form decides what the identifier is:
+
+| URL | Identifier | Resolution |
+| --- | --- | --- |
+| `/stream/<x>`, `/live/<x>` | stream id, or an alias by legacy | 22-char value is used as a stream id; anything else goes through the alias path |
+| `/<alias>`, `/@<alias>`, `/profile/<alias>` | profile alias | alias → account id → current live stream id |
+| `/profile/<account-id>` | account id | the alias conversion 404s, so the 22-char value is used as `broadcasterId` directly |
+
+Stream ids and account ids are both 22-char base64url values, so the string
+shape cannot tell them apart. The extractor never guesses: a profile URL is
+always treated as a profile. A profile URL with an account id therefore works,
+while the same value on `/stream/` is a stream id.
+
+An offline profile is a semantic answer, not a failure: the stream-id lookup
+answers 404 and the extractor raises `UserNotLive`. yt-dlp's
+`--wait-for-video N` catches that exception and re-extracts every N seconds;
+each retry resolves the alias again, so the stream id that appears later is
+picked up. That is the tracking path:
+
+```sh
+yt-dlp --wait-for-video 60 -f 1 "https://www.tango.me/@<alias>"
+```
+
+The loop ends when a recording ends. A shell loop around it (with
+`--download-archive`) tracks across separate broadcasts.
+
+Metadata comes from the page, not from guesswork:
+
+- `tango.me/<alias>` renders a schema.org `ProfilePage` with `name`,
+  `identifier`, `image`, `description` and a `FollowAction`
+  `userInteractionCount`. It renders for offline profiles too.
+- `tango.me/@<alias>` and `tango.me/profile/<alias>` are SPA shells with a
+  generic title; fetch the bare alias URL instead.
+- `tango.me/stream/<id>` carries the live title (`Name (@alias) is Live on
+  Tango`), which is the only alias source when the input is a stream id.
+
+The extractor maps the profile page to `uploader`, `uploader_id`,
+`channel_url`, `description`, `thumbnail` and `channel_follower_count`.
 
 ## Session rules
 
