@@ -1,13 +1,15 @@
 # Captured tango.me fixtures
 
-Scrubbed copies of live `www.tango.me` responses — the watch capture that
-mirrors `/tmp/watch.bin`, and the API contract decoded in `PLAN.md` from
-check-in-cookie-jar captures (`curl -c jar.txt -b jar.txt`) — with ids, names,
-thumbnails and CDN hashes replaced by the fixed values in `tests/fake_net.py`
+Scrubbed tango.me fixture data.  Only `watch.json` is a live capture (the
+watch response from `/tmp/watch.bin`, scrubbed); every other file is
+reconstructed from the API contract decoded in `PLAN.md`, originally from
+check-in-cookie-jar captures (`curl -c jar.txt -b jar.txt`).  Ids, names,
+thumbnails and CDN hashes use the fixed values in `tests/fake_net.py`
 (`STREAM_ID`, account id `GGGGHHHHIIIIJJJJKKKKLL`, CDN
 `cinema-in41.tango.me`, hashes `'1' * 32` / `'2' * 32` / `'3' * 32`).  No
 tokens, account ids or personal data are stored here; `check_in` replies its
-cookies through the route table in `base_routes()` instead of the fixture file.
+cookies through the route table in `base_routes()` instead of the fixture
+file.
 
 | File | Method and URL | Request body |
 |---|---|---|
@@ -27,9 +29,14 @@ cookies through the route table in `base_routes()` instead of the fixture file.
 
 `watch.json` mirrors the real watch response captured in `/tmp/watch.bin`
 (stream id, account ids, thumbnail and the four CDN hashes scrubbed; viewer
-and point counters kept as observed).  `watch_terminated.json` and
-`watch_bad_request.json` are the observed `{"code": ...}` shapes recorded in
-`PLAN.md` rather than fresh captures: a terminated stream and an audio room
-both answer the same watch call, but the capture session predates this fixture
-set, so their bodies are reconstructed from the documented failure modes.
+and point counters kept as observed).  It is the only row captured fresh.
+`watch_terminated.json` and `watch_bad_request.json` are the observed
+`{"code": ...}` shapes recorded in `PLAN.md` rather than fresh captures: a
+terminated stream and an audio room both answer the same watch call, but the
+capture session predates this fixture set, so their bodies are reconstructed
+from the documented failure modes.  The remaining rows (`check_in.json`,
+`token.json`, `watch_wrong_id.json`, `alias_convert.txt`, `stream_id.txt`,
+`profile.html`, `feed.json`, `master.m3u8`, `hd.m3u8`, `ld.m3u8`) are
+likewise reconstructed from the shapes recorded in `PLAN.md` (and, for
+`profile.html`, the page the extractor parses) rather than captured fresh.
 `alias_convert.txt` and `stream_id.txt` carry no trailing newline.
