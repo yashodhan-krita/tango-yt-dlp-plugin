@@ -301,10 +301,16 @@ seconds as a debug line (not a progress line), and relay requests to
 
 If a playlist 401s immediately, either `watch` did not run for that stream or
 the `tte` value does not equal `expireAt`. If a playlist fetch stalls behind
-a proxy, check that `no_proxy` reached the ffmpeg process.
+a proxy, check that `no_proxy` reached the ffmpeg process. If a proxied run
+fails before playback with "HLS manifest could not be read", the relay's
+master fetch went through the proxy: it needs its per-request
+`__noproxy__` bypass.
 
 ## Open questions
 
+- A stream that ends mid-recording has not been caught live. The 404/410
+  ending is covered offline and the logic is straightforward, but the
+  real-broadcast path is unproven.
 - Followers-only and private streams are implemented but not proven end to
   end; that needs an account that follows a live broadcaster.
 - Audio rooms answer `FAILED_BAD_REQUEST` to `watch`. Whether they expose HLS
