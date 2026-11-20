@@ -110,7 +110,10 @@ The URL form decides what the identifier is:
 Stream ids and account ids are both 22-char base64url values, so the string
 shape cannot tell them apart. The extractor never guesses: a profile URL is
 always treated as a profile. A profile URL with an account id therefore works,
-while the same value on `/stream/` is a stream id.
+while the same value on `/stream/` is a stream id. When the alias lookup
+rejects a 22-char value, it is used as `broadcasterId` and the "not live"
+message says "treated as an account id", which makes a mistyped alias
+diagnosable instead of an endless wait.
 
 An offline profile is a semantic answer, not a failure: the stream-id lookup
 answers 404 and the extractor raises `UserNotLive`. yt-dlp's
@@ -125,11 +128,26 @@ yt-dlp --wait-for-video 60 -f 1 "https://www.tango.me/@<alias>"
 The loop ends when a recording ends. A shell loop around it (with
 `--download-archive`) tracks across separate broadcasts.
 
+Identifiers are percent-decoded once before use, and both control responses
+are accepted only when the body is shaped like a 22-char id; a gateway or
+CDN error page reads as "no profile" / "not live" rather than travelling on
+as an id. The `--wait-for-video` hint is left out when the caller already
+set that option.
+
+A profile URL means the current live stream, so a stream that ended between
+resolution and `watch` raises `UserNotLive` (both `FAILED_TERMINATED` and a
+non-`LIVING` status). That makes `--wait-for-video` re-resolve instead of
+downloading the finished recording. A `/stream/<id>` URL keeps the recording
+fallback.
+
 Metadata comes from the page, not from guesswork:
 
 - `tango.me/<alias>` renders a schema.org `ProfilePage` with `name`,
   `identifier`, `image`, `description` and a `FollowAction`
   `userInteractionCount`. It renders for offline profiles too.
+- `tango.me/<account-id>` renders the same `ProfilePage` under the account's
+  canonical address, with `identifier` set to the account id. The extractor
+  reads it for account-id profile URLs, so followers and bio are not lost.
 - `tango.me/@<alias>` and `tango.me/profile/<alias>` are SPA shells with a
   generic title; fetch the bare alias URL instead.
 - `tango.me/stream/<id>` carries the live title (`Name (@alias) is Live on

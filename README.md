@@ -72,7 +72,15 @@ done
 Profile URLs accept an alias, `@alias`, `/profile/<alias>`, or the site's
 22-char account id (`/profile/<account-id>`). The extractor reads the public
 profile page for the display name, avatar, bio and follower count instead of
-guessing them from the stream title.
+guessing them from the stream title; an account-id URL is the same page under
+its canonical address. Because the URL form decides the meaning, a bare
+`/<22-char-id>` is a profile now, not a stream — use `/stream/<id>` when you
+mean the stream id itself.
+
+A profile URL always means *the current live stream*. If the broadcast ends
+between resolution and lookup, it reports `not live` so `--wait-for-video`
+keeps waiting. A `/stream/<id>` URL keeps the older behaviour and falls back
+to the stream's finished recording.
 
 Stop a recording with Ctrl-C. yt-dlp finalises the file and MP4-fixes it.
 
