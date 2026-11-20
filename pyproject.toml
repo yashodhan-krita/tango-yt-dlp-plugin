@@ -1,0 +1,10 @@
+[project]
+name = "tango-yt-dlp-plugin"
+version = "0.2.0"
+description = "yt-dlp extractor plugin for tango.me live streams"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["yt-dlp>=2024.0.0"]
+
+[tool.setuptools.packages.find]
+include = ["yt_dlp_plugins*"]
