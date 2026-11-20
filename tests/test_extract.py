@@ -16,7 +16,7 @@ from unittest import mock
 from urllib.parse import urlparse
 
 from yt_dlp.networking.exceptions import RequestError
-from yt_dlp.utils import ExtractorError
+from yt_dlp.utils import ExtractorError, UserNotLive
 
 from yt_dlp_plugins.extractor.tango import (
     TangoFeedIE,
@@ -27,6 +27,7 @@ from yt_dlp_plugins.extractor.tango import (
 
 from tests import fake_net
 from tests.fake_net import (
+    ACCOUNT_ID,
     ALIAS,
     STREAM_ID,
     Reply,
@@ -197,6 +198,46 @@ class ExtractionTest(unittest.TestCase):
             info = TangoIE(make_downloader(base_routes()))._real_extract(
                 f'https://www.tango.me/{entry}')
             self.assertEqual(info['id'], STREAM_ID)
+
+    def test_a_profile_url_reads_the_profile_page(self):
+        # The stream page fixture says "Tango Tester"; the profile page says
+        # "Tango Tester Two", so the richer profile source is proven to be used.
+        info = TangoIE(make_downloader(base_routes()))._real_extract(
+            f'https://www.tango.me/@{ALIAS}')
+        self.assertEqual(info['id'], STREAM_ID)
+        self.assertEqual(info['uploader'], 'Tango Tester Two')
+        self.assertEqual(info['uploader_id'], ALIAS)
+        self.assertEqual(info['channel_url'], f'https://www.tango.me/{ALIAS}')
+        self.assertEqual(info['channel_follower_count'], 1234)
+        self.assertEqual(
+            info['description'],
+            'Watch Tango Tester Two on Tango. Send gifts, join the chat and '
+            'connect in real time.')
+
+    def test_a_profile_account_id_is_never_read_as_a_stream_id(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me',
+                '/api/visitors/profilealias/api/alias/convert')] = Reply(
+                    b'', status=404)
+        ydl = make_downloader(routes)
+        info = TangoIE(ydl)._real_extract(
+            f'https://www.tango.me/profile/{ACCOUNT_ID}')
+        self.assertEqual(info['id'], STREAM_ID)
+        lookups = requests_to(ydl, '/stream/v1/id')
+        self.assertEqual(len(lookups), 1)
+        self.assertIn(f'broadcasterId={ACCOUNT_ID}', lookups[0].url)
+        self.assertEqual(requests_to(ydl, f'stream/{ACCOUNT_ID}'), [])
+
+    def test_an_offline_profile_explains_how_to_wait(self):
+        routes = base_routes()
+        routes[('GET', 'www.tango.me',
+                '/api/showroom-streams/api/public/stream/v1/id')] = Reply(
+                    b'', status=404)
+        with self.assertRaises(UserNotLive) as ctx:
+            TangoIE(make_downloader(routes))._real_extract(
+                f'https://www.tango.me/@{ALIAS}')
+        self.assertIn(ALIAS, str(ctx.exception))
+        self.assertIn('--wait-for-video', str(ctx.exception))
 
     def test_the_account_session_survives_the_check_in(self):
         ydl = make_downloader(base_routes())

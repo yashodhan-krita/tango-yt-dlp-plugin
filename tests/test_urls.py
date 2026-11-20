@@ -10,6 +10,8 @@ import unittest
 
 from yt_dlp_plugins.extractor.tango import TangoFeedIE, TangoIE
 
+from tests.fake_net import ACCOUNT_ID
+
 STREAM = 'jBLKPPFpEsXV2S2C7nC39A'
 
 
@@ -36,6 +38,20 @@ class StreamUrlTest(unittest.TestCase):
                     'https://www.tango.me/search',
                     'https://www.tango.me/live'):
             self.assertFalse(TangoIE.suitable(url), url)
+
+    def test_profile_and_stream_forms_are_told_apart(self):
+        account = f'https://www.tango.me/profile/{ACCOUNT_ID}'
+        self.assertTrue(TangoIE.suitable(account))
+        self.assertEqual(TangoIE._match_valid_url(account).group('id'), ACCOUNT_ID)
+        self.assertTrue(TangoIE._is_profile_url(account))
+        for url in (f'https://www.tango.me/stream/{ACCOUNT_ID}',
+                    f'https://www.tango.me/live/{ACCOUNT_ID}',
+                    f'https://m.tango.me/stream/{ACCOUNT_ID}'):
+            self.assertFalse(TangoIE._is_profile_url(url), url)
+        for url in (f'https://www.tango.me/{ACCOUNT_ID}',
+                    f'https://www.tango.me/@{ACCOUNT_ID}',
+                    f'https://www.tango.me/profile/{ACCOUNT_ID}'):
+            self.assertTrue(TangoIE._is_profile_url(url), url)
 
 
 class FeedUrlTest(unittest.TestCase):

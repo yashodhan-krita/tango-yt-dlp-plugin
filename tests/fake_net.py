@@ -30,7 +30,7 @@ STREAM_ID = 'AAAABBBBCCCCDDDDEEEEFF'
 ALIAS = 'tango_tester'
 CDN = 'cinema-in41.tango.me'
 
-_ACCOUNT_ID = 'GGGGHHHHIIIIJJJJKKKKLL'
+ACCOUNT_ID = 'GGGGHHHHIIIIJJJJKKKKLL'
 _MASTER_HASH = '1' * 32
 _HD_HASH = '2' * 32
 _LD_HASH = '3' * 32
@@ -93,6 +93,8 @@ def base_routes() -> dict[tuple[str, str, str], Reply | list[Reply]]:
              'feed.json', headers=json_type),
         ('GET', 'www.tango.me', f'/stream/{STREAM_ID}'): fixture_reply(
             'profile.html', headers=(('Content-Type', 'text/html; charset=utf-8'),)),
+        ('GET', 'www.tango.me', f'/{ALIAS}'): fixture_reply(
+            'profile_page.html', headers=(('Content-Type', 'text/html; charset=utf-8'),)),
         ('GET', CDN, f'/v2/{_MASTER_HASH}/master.m3u8'): fixture_reply(
             'master.m3u8', headers=m3u8_type),
         ('GET', CDN, f'/v2/{_HD_HASH}/hd.m3u8'): fixture_reply(

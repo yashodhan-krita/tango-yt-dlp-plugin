@@ -668,29 +668,45 @@ class TangoBase(InfoExtractor):
 
     # -------------------------------------------------------------- resolving
 
-    def _resolve_stream_id(self, alias_or_id):
-        """Accept a 22-char stream id, a profile alias, or a shared ``@alias``."""
-        alias_or_id = (alias_or_id or '').lstrip('@')
-        if re.fullmatch(_STREAM_ID_RE, alias_or_id):
-            return alias_or_id
+    def _resolve_stream_id(self, alias_or_id, *, is_profile=False):
+        """Resolve an identifier to the broadcaster's current live stream.
+
+        A stream URL carries a 22-char stream id; a profile URL carries an
+        alias or, just as validly, the 22-char account id from the site's own
+        profile data.  The two id shapes are indistinguishable, so the URL form
+        decides: ``is_profile`` never reads its identifier as a stream id.
+        """
+        identifier = (alias_or_id or '').lstrip('@')
+        if not is_profile and re.fullmatch(_STREAM_ID_RE, identifier):
+            return identifier
         # A rejected alias or an offline broadcaster answers 404, which is a
         # semantic answer rather than a transport failure: accept it so the
         # retry budget is not spent on it.
         account_id = (self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/visitors/profilealias/api/alias/convert',
-            alias_or_id, note='Resolving profile alias',
-            query={'alias': alias_or_id}, fatal=True, expected_status=404,
+            identifier, note='Resolving profile alias',
+            query={'alias': identifier}, fatal=True, expected_status=404,
             headers=self._api_headers())) or '').strip()
+        if not account_id and is_profile and re.fullmatch(
+                _STREAM_ID_RE, identifier):
+            # Profile pages accept the account id directly; there is no alias
+            # to convert in that case.
+            account_id = identifier
         if not account_id:
             raise ExtractorError(
-                f'No tango.me profile found for "{alias_or_id}"', expected=True)
+                f'No tango.me profile found for "{identifier}"', expected=True)
         stream_id = (self._retry(lambda: self._download_webpage(
             f'{self._API_BASE}/showroom-streams/api/public/stream/v1/id',
-            alias_or_id, note='Looking for a live stream',
+            identifier, note='Looking for a live stream',
             query={'broadcasterId': account_id}, fatal=True,
             expected_status=404, headers=self._api_headers())) or '').strip()
         if not stream_id:
-            raise UserNotLive(video_id=alias_or_id)
+            account_note = '' if identifier == account_id else (
+                f' (account {account_id})')
+            raise UserNotLive(
+                f'tango.me profile "{identifier}" is not live{account_note}; '
+                'retry with --wait-for-video 60 to wait for it',
+                video_id=identifier)
         return stream_id
 
     def _watch(self, stream_id):
@@ -721,13 +737,25 @@ class TangoBase(InfoExtractor):
                 expected=True)
         return data
 
-    def _profile_metadata(self, video_id):
-        """Best-effort metadata from the server-rendered stream/profile page."""
+    def _profile_metadata(self, video_id, alias=None):
+        """Best-effort metadata from the server-rendered profile or stream page.
+
+        A profile page (``tango.me/<alias>``) renders a schema.org
+        ``ProfilePage`` with the display name, alias, avatar, bio and follower
+        count, and it does so whether the broadcaster is live or offline.  A
+        stream page only carries the live title, which names the broadcaster
+        and their alias; that is the fallback when only a stream id is known.
+        """
+        if alias:
+            url = f'https://www.tango.me/{urllib.parse.quote(alias, safe="")}'
+            note = 'Downloading profile page'
+        else:
+            url = f'https://www.tango.me/stream/{video_id}'
+            note = 'Downloading stream page'
         html = self._download_webpage(
-            f'https://www.tango.me/stream/{video_id}', video_id,
-            note='Downloading stream page', fatal=False) or ''
+            url, video_id, note=note, fatal=False) or ''
         title = self._og_search_property('title', html, default='') or ''
-        name = alias = None
+        name = profile_alias = description = thumbnail = followers = None
         for block in re.findall(
                 r'<script[^>]+type="application/ld\+json"[^>]*>\s*(.*?)\s*</script>',
                 html, re.DOTALL):
@@ -735,23 +763,32 @@ class TangoBase(InfoExtractor):
                 data = json.loads(block)
             except json.JSONDecodeError:
                 continue
-            if isinstance(data, dict) and isinstance(data.get('mainEntity'), dict):
-                entity = data['mainEntity']
-                name = entity.get('name') or name
-                alias = entity.get('identifier') or alias
-        if not alias:
-            match = re.search(r'\(@([^)\s]+)\)', title)
-            if match:
-                alias = match.group(1)
-        if not name:
-            name = re.sub(r'\s*\(@[^)]*\).*$', '', title).strip() or None
+            entity = data.get('mainEntity') if isinstance(data, dict) else None
+            if not isinstance(entity, dict):
+                continue
+            profile_alias = entity.get('identifier') or profile_alias
+            name = entity.get('name') or name
+            description = entity.get('description') or description
+            thumbnail = url_or_none(entity.get('image')) or thumbnail
+            for stat in entity.get('interactionStatistic') or []:
+                if isinstance(stat, dict) and 'FollowAction' in str(
+                        stat.get('interactionType')):
+                    followers = int_or_none(
+                        stat.get('userInteractionCount')) or followers
+        match = re.search(r'\(@([^)\s]+)\)', title)
+        if match:
+            profile_alias = match.group(1)
+            # The title carries the display name as the site renders it,
+            # including emoji the schema.org name may have dropped.
+            name = re.sub(r'\s*\(@[^)]*\).*$', '', title).strip() or name
         return {
             'name': name,
-            'alias': alias,
+            'alias': profile_alias,
             'description': self._og_search_property(
-                'description', html, default=None),
+                'description', html, default=None) or description,
             'thumbnail': url_or_none(self._og_search_property(
-                'image', html, default=None)),
+                'image', html, default=None)) or thumbnail,
+            'followers': followers,
         }
 
     # --------------------------------------------------------------- formats
@@ -785,9 +822,24 @@ class TangoBase(InfoExtractor):
 
     # ---------------------------------------------------------------- shared
 
-    def _extract_stream(self, url, video_id):
+    @staticmethod
+    def _is_profile_url(url):
+        """Whether a matched URL names a profile rather than a stream.
+
+        ``/stream/<x>`` and ``/live/<x>`` carry a stream id.  A bare alias,
+        ``@alias`` and ``/profile/<x>`` all identify the broadcaster, and the
+        identifier may be either an alias or a 22-char account id.
+        """
+        first = urllib.parse.urlparse(url).path.lstrip('/').split('/', 1)[0]
+        return first not in ('stream', 'live')
+
+    def _extract_stream(self, url, video_id, is_profile=False):
         self._ensure_session(video_id)
-        stream_id = self._resolve_stream_id(video_id)
+        alias_hint = (video_id or '').lstrip('@') if is_profile else None
+        if alias_hint and re.fullmatch(_STREAM_ID_RE, alias_hint):
+            # A profile URL may carry the opaque account id instead of an alias.
+            alias_hint = None
+        stream_id = self._resolve_stream_id(video_id, is_profile=is_profile)
 
         data = self._watch(stream_id)
         details = data.get('details') or {}
@@ -806,8 +858,8 @@ class TangoBase(InfoExtractor):
                 f'Stream is not live (status: {status or "unknown"}); '
                 'falling back to the complete recording')
 
-        profile = self._profile_metadata(stream_id)
-        alias = profile.get('alias')
+        profile = self._profile_metadata(stream_id, alias=alias_hint)
+        alias = profile.get('alias') or alias_hint
         name = profile.get('name') or alias or stream_id
 
         refresher = TangoTokenRefresher(self, stream_id)
@@ -858,12 +910,15 @@ class TangoBase(InfoExtractor):
             'uploader': name,
             'uploader_id': alias,
             'channel': name,
-            'channel_id': details.get('anchor', {}).get('encryptedAccountId'),
+            'channel_id': traverse_obj(
+                details, ('anchor', 'encryptedAccountId'))
+            or traverse_obj(stream, 'encryptedAccountId'),
             'channel_url': f'https://www.tango.me/{alias}' if alias else None,
             'uploader_url': f'https://www.tango.me/{alias}' if alias else None,
             'webpage_url': url,
             'thumbnail': traverse_obj(stream, 'thumbnail') or profile.get('thumbnail'),
             'description': profile.get('description'),
+            'channel_follower_count': profile.get('followers'),
             'concurrent_view_count': int_or_none(details.get('viewerCount')),
             'view_count': int_or_none(details.get('uniqueViewerCount')),
             'tags': traverse_obj(details, ('tags', ...)),
@@ -937,4 +992,5 @@ class TangoIE(TangoBase):
     }]
 
     def _real_extract(self, url):
-        return self._extract_stream(url, self._match_id(url))
+        return self._extract_stream(
+            url, self._match_id(url), is_profile=self._is_profile_url(url))
