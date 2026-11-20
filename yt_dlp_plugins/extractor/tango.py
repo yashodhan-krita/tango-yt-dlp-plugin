@@ -87,7 +87,9 @@ class TangoTokenRefresher:
         return f'tt={self._token}; ttu={self.username}; tte={int(self.expires)}'
 
     def refresh(self):
-        data = self.ie._issue_token(self.video_id, note=None)
+        # note=False, not None: yt-dlp prints its default "Downloading
+        # webpage" line for None, and a refresh happens every eight seconds.
+        data = self.ie._issue_token(self.video_id, note=False)
         self._store(data['token'], data['username'], data['expireAt'])
         self.ie.write_debug(f'Stream token refreshed (expires at {int(self.expires)})')
 
@@ -583,9 +585,25 @@ class TangoBase(InfoExtractor):
     # --------------------------------------------------------------- formats
 
     def _hls_formats(self, playlist_url, video_id, live):
-        formats, subtitles = self._extract_m3u8_formats_and_subtitles(
-            playlist_url, video_id, ext='mp4', live=live,
-            note='Downloading HLS manifest', fatal=False)
+        # yt-dlp's --proxy map is {'all': proxy} with no 'no' entry, and
+        # select_proxy only consults no_proxy when 'no' is present.  Its own
+        # request to the loopback relay would therefore be tunnelled through
+        # an off-host proxy, which cannot reach this machine's 127.0.0.1.
+        # Fetching the master playlist with an explicit proxy bypass keeps
+        # --proxy working; ffmpeg gets no_proxy for the rest.
+        response = self._request_webpage(
+            Request(playlist_url, proxies={'all': '__noproxy__'}),
+            video_id, note='Downloading HLS manifest', fatal=False)
+        formats, subtitles = [], {}
+        if response is not False:
+            try:
+                body = response.read().decode('utf-8', 'replace')
+            finally:
+                response.close()
+            if body.lstrip().startswith('#EXTM3U'):
+                formats, subtitles = self._parse_m3u8_formats_and_subtitles(
+                    body, playlist_url, ext='mp4', live=live, fatal=False,
+                    video_id=video_id)
         for f in formats:
             f['http_headers'] = dict(f.get('http_headers') or {}, **{
                 'Origin': 'https://www.tango.me',

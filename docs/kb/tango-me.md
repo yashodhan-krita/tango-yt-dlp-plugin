@@ -122,12 +122,28 @@ Earlier approaches and why they were dropped:
 
 ### Proxy interaction
 
-yt-dlp passes `--proxy` to ffmpeg as `http_proxy`, and ffmpeg applies it to
-every request, including the loopback relay, so a proxied run stalls. The
-extractor appends `127.0.0.1` and `localhost` to both `no_proxy` and
-`NO_PROXY` (extend, never replace; trimmed and deduplicated; idempotent).
-It writes both spellings because ffmpeg reads the lowercase one and some
-other tools read the uppercase one. API and CDN traffic still uses the proxy.
+ffmpeg takes the proxy from the environment (`http_proxy`, which yt-dlp sets
+from `--proxy`) and applies it to every request, including the loopback relay,
+so a proxied run stalls. The extractor appends `127.0.0.1` and `localhost` to
+both `no_proxy` and `NO_PROXY` (extend, never replace; trimmed and
+deduplicated; idempotent). It writes both spellings because ffmpeg reads the
+lowercase one and some other tools read the uppercase one. API and CDN traffic
+still uses the proxy.
+
+`no_proxy` alone is not enough for yt-dlp's **own** requests. Under `--proxy`,
+yt-dlp sets `proxies = {'all': proxy}` with no `'no'` entry, and
+`select_proxy` consults `no_proxy` only when `'no'` is present
+(`yt_dlp/utils/networking.py`). The extractor's one Python-side fetch of the
+relay's master playlist would therefore be tunnelled through the proxy. A
+proxy on another host resolves `127.0.0.1` to itself, answers 502, and the run
+dies with "HLS manifest could not be read" — which reads like an auth problem.
+The fix is per-request: fetch the master with
+`Request(url, proxies={'all': '__noproxy__'})`, which yt-dlp turns into "no
+proxy" for that request. The relay's own CDN fetches keep using the proxy.
+
+This only shows up against a proxy that cannot reach loopback. A proxy running
+on the same machine answers `127.0.0.1` happily and hides the bug; the live
+check below therefore used one that refuses loopback.
 
 ## Degradation policy
 
@@ -175,6 +191,29 @@ downloaded.
 - `watch` increments the viewer count, so the reported viewer number
   includes this download.
 
+## Live verification (2026-11-20, merged build)
+
+Every run below used the installed plugin and a real broadcast; durations are
+`ffprobe`'s, not the wall clock.
+
+| Run | Result |
+| --- | --- |
+| Stream id, 125 s cap | 115.6 s, 720x1280, H.264 + AAC, clean on SIGINT, no warnings. 1 check-in, 1 `watch`, ~14 token refreshes |
+| `@jazz69`, `/profile/jazz69` | alias resolved, stream lookup ran, `The channel is not currently live` — the alias path is proven end to end |
+| `--proxy` at a proxy that refuses loopback, 30 s cap | 29.4 s, 22 segments, zero loopback requests through the proxy, CDN traffic proxied |
+| `--cookies-from-browser chrome`, 30 s cap | 3711 cookies read, one token 403, forced re-check-in, then 26.8 s of 360x640 video — the recovery path works live |
+
+Two details from those runs:
+
+- The feed's `broadcaster.alias` was null for all 30 live entries, so an alias
+  cannot be discovered from the feed. Alias URLs still work; they are a legacy
+  identity route, not the current one.
+- A token 403 with a browser jar is expected once: the jar's identity is
+  reused, and `_issue_token` resets the visitor and retries. The recording
+  starts one or two seconds later; it is not a failure.
+- The Chrome run picked the 360x640 rendition with `-f 1` because that master
+  listed the low variant first. The manifest order is not quality order.
+
 ## Packaging and plugin loading
 
 - yt-dlp loads plugins from the `yt_dlp_plugins` namespace package, from
@@ -217,6 +256,16 @@ Traps that cost time:
   check.
 - `expected_status=404` on `_download_webpage` yields the empty body, so
   "no such profile" and "not live" stay single-request semantic answers.
+- `note=None` is not silence. For `None`, yt-dlp calls
+  `report_download_webpage` and prints its default "Downloading webpage"
+  line; only `note=False` suppresses it. The token refresher passed `None`
+  and printed a line every eight seconds for a whole recording, and the test
+  pinned `None` as if it were silence. Both are fixed; assert `False`, not
+  `None`, when the point is quiet.
+- `_parse_m3u8_formats_and_subtitles` does not fetch variant playlists for a
+  master unless `hls_split_discontinuity` is on. That makes the master fetch
+  the only Python-side request in a proxy-free relay path, which is why one
+  per-request proxy bypass is enough.
 - Fixtures: only `watch.json` came from a live capture. The rest are
   reconstructed from the contract in `PLAN.md`, with fixed scrubbed ids.
   `tests/fixtures/README.md` records which is which.

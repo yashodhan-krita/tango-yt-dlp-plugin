@@ -232,6 +232,15 @@ class ExtractionTest(unittest.TestCase):
             _exempt_loopback_from_proxy()
             self.assertEqual(os.environ['no_proxy'], 'corp.example,127.0.0.1,localhost')
 
+    def test_the_manifest_fetch_bypasses_a_configured_proxy(self):
+        # --proxy gives yt-dlp {'all': ...} with no 'no' entry, so no_proxy is
+        # ignored for its own requests; the relay fetch must say so per request.
+        ie = TangoIE()
+        ie._request_webpage = mock.Mock(return_value=False)
+        ie._hls_formats('http://127.0.0.1:1234/live.m3u8?m=x', 'v', live=True)
+        request = ie._request_webpage.call_args.args[0]
+        self.assertEqual(request.proxies, {'all': '__noproxy__'})
+
 
 if __name__ == '__main__':
     unittest.main()
