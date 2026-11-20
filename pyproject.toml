@@ -6,9 +6,5 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["yt-dlp>=2024.0.0"]
 
-[project.entry-points."yt-dlp.extractor"]
-tango = "yt_dlp_plugins.extractor.tango:TangoIE"
-tango_feed = "yt_dlp_plugins.extractor.tango:TangoFeedIE"
-
 [tool.setuptools.packages.find]
 include = ["yt_dlp_plugins*"]

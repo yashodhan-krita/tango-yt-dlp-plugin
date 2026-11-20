@@ -58,6 +58,11 @@ yt-dlp --wait-for-video 60 -f 1 "https://www.tango.me/<alias>"
 
 Stop a recording with Ctrl-C. yt-dlp finalises the file and MP4-fixes it.
 
+A live recording is dated. The extractor derives `timestamp` from how long
+the broadcast has been running, and yt-dlp turns it into `upload_date`, so
+`%(upload_date)s` in an output template is the day the stream began. The
+value can be off by a few seconds.
+
 ### Anonymous vs logged in
 
 | | Anonymous | `--cookies-from-browser chrome` |
@@ -122,6 +127,12 @@ playlist, and rewrites segment URIs to absolute CDN URLs so the video itself
 does not pass through Python. Master playlists keep pointing at the relay,
 because variant playlists need the token too.
 
+A proxy would swallow that loopback URL: yt-dlp passes `--proxy` (and
+`http_proxy` from the environment) on to ffmpeg, which applies it to every
+request it makes. The extractor appends `127.0.0.1` and `localhost` to
+`no_proxy`/`NO_PROXY` when it runs, so the relay is reached directly while
+the API and CDN traffic keeps going through the proxy.
+
 If the token endpoint ever refuses, the relay replays the last playlist it
 fetched (up to two minutes old) instead of failing, which costs a few
 duplicated segments but keeps the recording alive. A refusal is also retried
@@ -142,8 +153,10 @@ rather than the recording failing.
 - **Ended streams.** Tango drops a stream from every route once it ends: the
   profile stream lookup 404s and `watch` answers `FAILED_TERMINATED`, with no
   HLS URL left anywhere. A download has to start while the stream is live.
-  If a stream ends *during* a recording, the recording ends and the file is
-  finalised.
+  If a stream ends *during* a recording, the CDN starts answering 404 or 410
+  for playlists the relay had already served; the relay marks the last one
+  with `#EXT-X-ENDLIST`, so ffmpeg finalises a playable file instead of the
+  download failing.
 
 ## Troubleshooting
 
@@ -156,9 +169,9 @@ rather than the recording failing.
   playlist for two minutes before ending the file cleanly.
 - `Stream unavailable (FAILED_TERMINATED)` — the stream has ended; only live
   streams carry an HLS URL.
-- Recording stalls behind a proxy — ffmpeg uses `http_proxy`/`https_proxy`
-  from the environment; add `127.0.0.1` to `no_proxy` so it can reach the
-  relay.
+- Recording stalls behind a proxy — the plugin already exempts the loopback
+  relay from it, so a stall means the proxy is failing the CDN traffic
+  itself.
 
 ## Tests
 

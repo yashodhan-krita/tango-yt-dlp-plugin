@@ -131,7 +131,8 @@ to which stream is downloading. The relay owns refresh now.
 
 **Refresh late.** The token has a 10-second TTL; `MARGIN` is 2 seconds, so a
 refresh happens every ~8 seconds rather than every 6. That is a third fewer
-calls to a rate-limited endpoint.
+calls to a rate-limited endpoint. A refresh is routine, so it is one debug
+line (`--verbose`), not a progress line.
 
 **Replay on throttle, end cleanly on exhaustion.** If the token cannot be
 refreshed, serving the last playlist for up to two minutes is better than
@@ -139,6 +140,42 @@ aborting an hours-long recording; ffmpeg re-requests a few segments and the
 recording continues. Past that, the cached media playlist is served with
 `#EXT-X-ENDLIST`, so ffmpeg finalises a playable file instead of the download
 failing.
+
+**End when the CDN throws the playlists away.** A 404 or 410 for a playlist
+the relay already served or emitted means the broadcast is over: the relay
+serves the cached playlist with `#EXT-X-ENDLIST` appended (a minimal ended
+playlist when nothing is cached), warns once, and keeps answering from the
+cache, so ffmpeg finalises a playable file instead of the download failing.
+The check runs before the retry decision, so an ended stream never burns a
+token refresh, and a path the relay never served still raises: a bad URL
+stays loud.
+
+**`completeListUrl` stays for its narrow window.** Once a stream ends,
+`watch` answers `FAILED_TERMINATED` with no details, the profile lookup 404s,
+and the stream page carries no HLS URL, so a finished stream is unreachable in
+practice. The coded `completeListUrl` fallback only covers a stream that ends
+between `watch` and the manifest fetch; it stays for that window.
+
+**Retry control calls, not semantic answers.** The four control calls (alias
+conversion, live-stream lookup, `watch`, the feed catalog) run through
+yt-dlp's `RetryManager`: a 5xx is retried and then reported as the site's
+fault rather than a bad URL. A 404 on the alias and stream-id lookups is
+accepted as the answer (`expected_status`), so a missing profile or an
+offline broadcaster never burns the budget.
+
+**Date live recordings from the duration.** The watch document reports how
+long the broadcast has been running, so a live stream gets `timestamp`: now
+minus that duration. yt-dlp derives `upload_date` from it. The value is
+approximate to a few seconds; a finished recording gets no timestamp,
+because the document does not carry its start.
+
+**Exempt the loopback relay from proxies.** yt-dlp passes `--proxy` on to
+ffmpeg as `http_proxy`, and ffmpeg applies it to every request it makes,
+including the relay, so a proxied ffmpeg never reaches the relay and the
+recording stalls. The extractor appends `127.0.0.1` and `localhost` to
+`no_proxy` and `NO_PROXY` (extended, never overridden; idempotent), both
+spellings because ffmpeg reads the lowercase one while other tools read the
+uppercase. API and CDN traffic keeps using the proxy.
 
 ## Measurements
 
@@ -157,13 +194,18 @@ failing.
   relay fixes).
 - Cut a recording with SIGINT and yt-dlp runs `FixupM3u8`; the `.mp4` is
   playable.
+- Packaging: `tango_yt_dlp_plugin-0.2.0-py3-none-any.whl` installs into a
+  clean venv with yt-dlp 2026.10.26 and registers both extractors
+  (`['tango', 'tango:live']` through a `YoutubeDL` instance's
+  `gen_extractor_classes()`). yt-dlp loads plugins from the `yt_dlp_plugins`
+  namespace package and does not scan entry points, and newer setuptools
+  rejects the hyphenated `[project.entry-points."yt-dlp.extractor"]` group,
+  so it is gone from `pyproject.toml`. `--list-extractors` prints before
+  plugins load (`yt_dlp/__init__.py:969` vs `:980`), so it cannot list
+  them.
 
 ## Open items
 
-- `completeListUrl` fallback for a finished stream is coded but unreachable in
-  practice: once a stream ends, `watch` answers `FAILED_TERMINATED` with no
-  details, the profile lookup 404s, and the stream page carries no HLS URL.
-  It only covers a stream that ends between `watch` and the manifest fetch.
 - A private/followers-only stream has not been tested end to end; the account
   cookie path is preserved for it.
 - Audio rooms (no video) answer `FAILED_BAD_REQUEST` to `watch`; whether they
