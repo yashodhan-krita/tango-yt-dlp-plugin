@@ -127,6 +127,12 @@ playlist, and rewrites segment URIs to absolute CDN URLs so the video itself
 does not pass through Python. Master playlists keep pointing at the relay,
 because variant playlists need the token too.
 
+The CDN's playlist holds only the newest eight seconds, and ffmpeg asks for
+the segment after the last one it played. A reload that lands a few seconds
+late would therefore skip segments and leave a short file, so the relay keeps
+the union of recent playlists and serves about 45 seconds of them. That sits
+inside the CDN's roughly 70-second segment retention.
+
 A proxy would swallow that loopback URL: yt-dlp passes `--proxy` (and
 `http_proxy` from the environment) on to ffmpeg, which applies it to every
 request it makes. The extractor appends `127.0.0.1` and `localhost` to
@@ -143,7 +149,9 @@ rather than the recording failing.
 ## Limits
 
 - **No DVR.** Live playlists hold an eight-second sliding window, so
-  `--live-from-start` cannot work. Recording starts at the live edge.
+  `--live-from-start` cannot work. Recording starts at the live edge. The
+  relay serves a merged window of about 45 seconds so a late playlist reload
+  does not drop segments; that is not seekable history, only slack.
 - **Token refresh is cheap.** One token per ~8 seconds, about 450 per hour.
   Measured on a single visitor identity: 400 token calls in 188 s and 200
   check-in-plus-token rounds in 191 s, none refused. Long recordings are

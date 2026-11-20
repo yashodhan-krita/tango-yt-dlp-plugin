@@ -63,6 +63,28 @@ Media playlists use `EXT-X-TARGETDURATION:1` and an eight-segment sliding
 window with no DVR. There is no earlier data to fetch, so `--live-from-start`
 cannot work. A recording starts at the live edge.
 
+Every segment carries `EXT-X-PROGRAM-DATE-TIME` before `EXTINF`. Segment tags
+belong to the segment that follows them; a merged playlist that hoists them
+into the header parses as malformed in ffmpeg and playback falls to roughly
+0.04x, with one segment fetched every 20 s.
+
+The relay does not pass the eight-segment window through. It keeps the union
+of recent playlists per stream, keyed by `EXT-X-MEDIA-SEQUENCE`, and serves up
+to 45 segments. ffmpeg asks for the segment after the one it last played, so
+without the union a reload that lands 8 s late skips whatever slid out;
+ffmpeg logs `skipping N segments` and the file is short. A 45-segment window
+tolerates a reload up to 45 s late, and stays inside the CDN's segment
+retention (below), so the oldest kept segment still returns bytes.
+
+### Segment retention
+
+Segments are public and cached: responses carry `cache-control: max-age=70`
+and `via: 1.1 varnish`. The retention is real and short. A segment fetched
+60 s after it appeared downloads in full (288204 bytes); the same URL 80 s
+after it appeared answers `HTTP 200` with `content-length: 0` and no bytes.
+That zero-length 200 is why the window cap is 45 rather than larger: a served
+segment must still be within 70 s of its appearance when ffmpeg asks for it.
+
 ### Failure codes, not HTTP statuses
 
 `watch` answers HTTP 200 with a semantic code:
@@ -214,6 +236,29 @@ Two details from those runs:
 - The Chrome run picked the 360x640 rendition with `-f 1` because that master
   listed the low variant first. The manifest order is not quality order.
 
+### Playlist window (2026-11-20, later)
+
+The 42-minute run that ended by itself was 67 s shorter than its wall time;
+the ffmpeg log showed 16 `skipping N segments` events, 23 segments lost. The
+CDN's eight-segment window could not cover a reload that landed late. The
+merged 45 s window was built to fix that, then measured:
+
+| Run | Result |
+| --- | --- |
+| Three concurrent 720p, 12 min cap | 699/672/688 s recorded against 717 s wall, 0.94–0.97x each, 3–11 segments skipped; the link carried ~2.5x realtime for three 2.3 Mbit/s streams, so each fell behind by more than 45 s and then skipped. No token retry, no re-check-in, all three files playable |
+| One 720p, 12 min cap | 714.3 s recorded against ~718 s wall, 1.00x, 715 segments, zero `skipping`, H.264 720x1280 + AAC. The ~4 s difference is the live-edge start |
+
+Under load one run stayed inside the window: it trailed the live edge by 14 s
+at the halfway point with zero skipped segments, which the eight-second
+window could not have done. The skips that did happen all came after a run
+had fallen more than 45 s behind, which is the cap working as designed: no
+window helps once the link cannot carry realtime.
+
+A first attempt served 0.04x and one segment every 20 s. `#EXTINF` and
+`#EXT-X-PROGRAM-DATE-TIME` had been hoisted into the playlist header, so the
+merged playlist listed all the segment tags before all the URIs. ffmpeg read
+it as malformed. Segment tags must travel with their segment.
+
 ## Packaging and plugin loading
 
 - yt-dlp loads plugins from the `yt_dlp_plugins` namespace package, from
@@ -308,11 +353,18 @@ master fetch went through the proxy: it needs its per-request
 
 ## Open questions
 
-- A stream that ends mid-recording has not been caught live. The 404/410
-  ending is covered offline and the logic is straightforward, but the
-  real-broadcast path is unproven.
+- A stream that ends mid-recording was caught once: the relay logged "The
+  stream has ended (the CDN answered 404)", ffmpeg exited 0, and the file was
+  playable. That run was 67 s short of its wall time, which is what led to the
+  merged playlist window; the window is now verified, but the end-during-a-
+  recording path has not been re-observed with it. The 404/410 ending also
+  stays covered offline.
 - Followers-only and private streams are implemented but not proven end to
-  end; that needs an account that follows a live broadcaster.
+  end; that needs an account that follows a live broadcaster. Three catalog
+  pulls (60 entries) contained no `isPrivateStream: true` entry.
+- Segment retention is measured from one CDN edge (`cinema-in41`): full at
+  60 s old, zero-length at 80 s. Other edges may differ, which is why the
+  window cap leaves 25 s of margin rather than sitting at the retention edge.
 - Audio rooms answer `FAILED_BAD_REQUEST` to `watch`. Whether they expose HLS
   at all is undecoded.
 - `tango_chat_recorder.py` still targets `wss://gateway.tango.me/ws`; the
