@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""
-tango_chat_recorder.py — Record tango.me live chat to SRT subtitle file.
+"""Chat-to-SRT sketch for the retired gateway.tango.me API; not used by the extractor.
 
-STATUS: experimental, not part of the extractor.  It still points at
-`wss://gateway.tango.me/ws`; the chat WebSocket used by the current web
-player has not been decoded.  Treat this as a starting point, and verify the
-endpoint in a browser before relying on it.
+Known breakage, left as is: it passes `extra_headers` to
+`websockets.connect`, which current `websockets` renamed `additional_headers`
+[needs live check: `pip install websockets` and run it against
+`--ws-url ws://127.0.0.1:9`; a TypeError naming `extra_headers` confirms it].
+The chat WebSocket used by the current web player has not been decoded.
 
 Usage:
-    python3 tango_chat_recorder.py <username> [--output chat.srt]
+    python3 contrib/tango_chat_recorder.py <username> [--output chat.srt]
 
 Requires:
     pip install websockets

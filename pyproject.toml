@@ -1,9 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tango-yt-dlp-plugin"
-version = "0.2.0"
+version = "0.3.0"
 description = "yt-dlp extractor plugin for tango.me live streams"
 readme = "README.md"
-requires-python = ">=3.9"
+# Tested floor: the suite has run only on CPython 3.15 with yt-dlp 2026.10.26,
+# and that yt-dlp requires Python >=3.11.  The plugin source parses as 3.9,
+# but nothing older than 3.15 has run the suite.
+requires-python = ">=3.11"
+# Only 2026.10.26 is tested; the real floor is unmeasured.
 dependencies = ["yt-dlp>=2024.0.0"]
 license = { text = "Unlicense" }
 classifiers = [
