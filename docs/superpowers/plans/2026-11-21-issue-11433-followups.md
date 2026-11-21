@@ -23,7 +23,7 @@ recording, because people keep re-deriving them.
 | `https://tango.me/stream/noscript.html` today | 200, no server redirect (the 2024 redirect is gone) |
 | plugin on `/stream/noscript.html`, `/live/noscript.html`, `/noscript.html` | `No tango.me profile found for "noscript.html"` (misleading) |
 | plugin on the issue's dead stream id | `The stream has ended` (good) |
-| plugin on the issue's alias `immm11` | `No tango.me profile found for "immm11"` (correct) |
+| plugin on the issue's alias (`<alias>`) | `No tango.me profile found for "<alias>"` (correct) |
 
 ## Task 1 — name the no-script page instead of resolving it
 
@@ -85,8 +85,8 @@ exactly as measured.
 
 ```sh
 cd ~/Projects/tango-yt-dlp-plugin
-PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/2026.10.26/libexec/bin/python \
-    -m unittest discover -s tests
+XDG_CONFIG_HOME="$(mktemp -d)" PYTHONPATH=. \
+    /opt/homebrew/Cellar/yt-dlp/2026.10.26/libexec/bin/python -m unittest discover -s tests
 yt-dlp --simulate --no-warnings 'https://www.tango.me/stream/noscript.html'
 ```
 
@@ -96,8 +96,9 @@ the four documents and `tango.py` plus the new test.
 
 ## Out of scope (recorded, not built)
 
-- Accepting a raw `master.m3u8?token=` URL: the token needs a stream id to
-  refresh, and the workaround exists only because there was no extractor.
+- Accepting a raw `master.m3u8?token=` URL: decided and built later, see the
+  follow-up branch `fix/cdn-url-and-account-session`. The token endpoint is
+  not stream-scoped, so a copied playlist URL needs no stream id.
 - Posting to the upstream issue: an operator decision, not a code change.
 - Proving the followers-only path: still needs a private stream and a following
   account, already listed as open.

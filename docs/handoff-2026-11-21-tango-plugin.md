@@ -1,10 +1,16 @@
 # Handoff — tango.me yt-dlp plugin
 
-State as of 2026-11-21. The work described here ends at `cc54b97`; this
-handoff is the commit after it. Working tree clean, 59 offline tests passing.
-A later review of yt-dlp issue #11433 on branch
-`fix/noscript-page-and-issue-notes` added a named error for tango's
-no-JavaScript page; 60 tests pass there (see section 9).
+State as of 2026-11-21, updated after the adversarial-hardening round.
+`main` is at `90d7f52` (PR #1, the no-JavaScript page error). Branch
+`fix/cdn-url-and-account-session` holds everything since as a release
+candidate; commits land next:
+`TangoCdnIE`, the shared `_relayed_formats`, the account cookie
+snapshot/restore, the hardening fixes and tests, these document updates, the
+packaging changes and the move of the chat recorder to `contrib/`. 102 offline
+tests pass with the gate command in section 7. The plan and its outcome are
+in `docs/superpowers/plans/2026-11-21-adversarial-hardening.md`. Chrome was
+signed out at the time of writing, so nothing that needs a signed-in browser
+was re-measured.
 This document is for whoever picks the plugin up next. It records what the
 tool does now, the contracts the site imposes, the parts that are easy to
 break, and the work that is still open. The short version of the site's
@@ -16,8 +22,11 @@ A yt-dlp extractor plugin for live streams on tango.me. It records a live
 broadcast through a loopback HLS relay, and it tracks a broadcaster by
 profile URL so the same command works across separate broadcasts.
 
-- Entry point: `yt_dlp_plugins/extractor/tango.py` (`TangoIE`, plus
-  `TangoBase` and the list extractor).
+- Entry point: `yt_dlp_plugins/extractor/tango.py`. Three extractors are
+  registered: `tango:live` (`TangoFeedIE`, the `/live` catalogue), `tango`
+  (`TangoIE`, stream and profile URLs) and `tango:cdn` (`TangoCdnIE`, a CDN
+  playlist URL copied from the browser). `TangoBase` holds the shared code
+  and is not registered (its name does not end in `IE`).
 - Installed as a plugin at
   `~/.config/yt-dlp/plugins/tango-yt-dlp/yt_dlp_plugins`, symlinked to this
   repo. Edits are live in the next `yt-dlp` run; no reinstall needed.
@@ -61,7 +70,7 @@ Recommended tracking command (README has the long form):
 ```sh
 while :; do
     yt-dlp --wait-for-video 60 --download-archive ~/.cache/tango-archive.txt \
-        -f 1 "https://www.tango.me/@<alias>" || true
+        -S res "https://www.tango.me/@<alias>" || true
     sleep 30
 done
 ```
@@ -78,7 +87,7 @@ profile identifier (alias or account id)
        ├─ 200 + 22-char body  -> current live stream id
        └─ 404                  -> UserNotLive (offline)
   └─ POST /api/visitors/stream/client/v2/stream/<stream id>/watch
-       ├─ code OK + details.stream -> stream document, CDN authorised
+       ├─ code OK + details.stream -> stream document (metadata, masterUrl)
        ├─ code FAILED_TERMINATED   -> UserNotLive on a profile URL
        └─ other codes              -> WATCH_ERRORS message, expected error
 ```
@@ -100,26 +109,56 @@ why `kind` is captured in `_VALID_URL` and the extractor never guesses.
 
 ```
 TangoBase (InfoExtractor)
-├── _ensure_session      visitor check-in, account cookies preserved
+├── _ensure_session      visitor check-in; drops datadome/_dd_s each step
+├── _check_in            snapshots account cookies, restores them after
+├── _issue_token         token calls; jar untouched, 403 -> new visitor
 ├── _resolve_stream_id   alias -> account id -> stream id  (returns both ids)
-├── _watch               registers the viewer; authorises the CDN
-├── _profile_metadata   schema.org ProfilePage -> uploader fields
-├── _hls_formats        asks the relay for the master playlist
-└── TangoTokenRefresher  re-issues tt/ttu/tte every ~8 s
+├── _watch               registers the viewer, returns the stream document
+├── _profile_metadata    schema.org ProfilePage -> uploader fields
+├── _hls_formats         asks the relay for the master playlist
+└── _relayed_formats     builds the relay, exempts loopback, reads formats
+TangoFeedIE  (tango:live)  /live catalogue
+TangoIE      (tango)       stream and profile URLs -> _extract_stream
+TangoCdnIE   (tango:cdn)   copied /v2/<hash>/*.m3u8 -> check-in, token, relay
 
-TangoHlsRelay (127.0.0.1, random port)
+TangoTokenRefresher      re-issues tt/ttu/tte every ~8 s, cool-down on failure
+TangoHlsRelay (127.0.0.1, random port; tango.me hosts only)
 ├── _TangoRelayHandler   HTTP/1.0, 30 s handler timeout
-├── _MediaWindow         merges recent playlists into a window
+├── _MediaWindow         merges recent live playlists into a window
 └── fetch                upstream through yt-dlp's urlopen stack
 ```
 
+`TangoIE` and `TangoCdnIE` both reach the relay through
+`_relayed_formats`, so the proxy exemption and the close-on-failure rule
+live in one place. `TangoCdnIE` makes no `watch` call: a fresh triplet
+authorises a playlist on its own (measured 2026-11-21).
+
 The relay exists because ffmpeg cannot read yt-dlp's cookie jar and the CDN
 token lives about ten seconds. Each playlist request fetches upstream with a
-fresh triplet in a plain `Cookie` header. The token is never written into the
-jar (it would leak onto unrelated requests). The relay also merges playlist
-reloads into a window, so a late reload does not lose segments it would have
-dropped; a 404/410 for a playlist it already served ends the recording
-cleanly with `#EXT-X-ENDLIST`.
+fresh triplet in a plain `Cookie` header. The relay does not store the
+triplet in the jar; the `token-data` reply sets it there itself for ten
+seconds (see the KB, Architecture). The relay also merges playlist
+reloads into a window. It never polls; it merges only when ffmpeg asks, so
+the window covers ffmpeg running up to about 45 s behind the live edge, but
+a gap of more than the CDN's ~8 s window between two reloads still loses the
+segments in between. A 404/410 for a playlist it already served ends the
+recording cleanly with `#EXT-X-ENDLIST`.
+
+The visitor check-in logs a `--cookies-from-browser` account out: its reply
+expires the host-only `Tango-WST`, `Tango-SD` and both `Tango-RT` paths; it
+does not expire `Tango-ST`
+(measured 2026-11-21: `me` answers 200 before the check-in and 401 after it;
+`test_without_the_restore_the_check_in_logs_the_account_out`).
+`_check_in` snapshots `Tango-ST`, `Tango-RT`, `Tango-WST` and the account
+`Tango-SD` and `_restore_account_cookies` re-adds whichever the reply
+removed, in a `finally`, so `watch` runs with the account cookies in the jar.
+The token request itself leaves the jar alone and carries them. A token 403
+on the relay thread forces a check-in there too, which expires the account
+cookies for the length of that one request before the restore; a Ctrl-C in
+that window could save a `--cookies` file without them `[needs live check]`
+(`test_the_jar_never_lacks_the_account_during_an_extraction`). That the site accepts the restored
+cookies, and whether they change the 403 recovery on a token call, is not
+measured `[needs live check]`. Details in `docs/kb/tango-me.md` under "Session rules".
 
 `127.0.0.1` and `localhost` are appended to `no_proxy`/`NO_PROXY` once, so
 ffmpeg does not tunnel the loopback relay. This mutates the process
@@ -134,11 +173,21 @@ environment by design; the CLI is the only supported embedding today.
    server and two threads behind on each wait cycle.
 4. **A profile URL means now.** Ended and terminated streams become
    `UserNotLive`; only `/stream/<id>` may hand back a finished recording.
-5. **Metadata never blocks a recording.** A missing or malformed profile page
-   warns and falls back to the stream title (`test_a_missing_profile_page_
-   does_not_stop_the_recording`).
-6. **The token header is the only place the triplet goes.** Not the jar, not
-   a URL, not a log line.
+5. **Metadata never blocks a recording.** A missing or malformed page warns
+   and the recording goes on. For an alias URL only the profile page is
+   fetched, and a failure leaves the alias as the name
+   (`test_a_missing_alias_profile_page_keeps_the_alias_as_the_name`). For a
+   stream URL only the stream page is fetched, and a failure leaves the
+   stream id as the name
+   (`test_a_missing_profile_page_does_not_stop_the_recording`).
+6. **The token travels in the relay's `Cookie` header, never in a log
+   line.** The username does not stay private: `_extract_stream` appends
+   `&username=<ttu>` to the master URL, the relay keeps that query on its
+   loopback URL, and yt-dlp reports it as `manifest_url` in `-j` and
+   `--write-info-json`. Whether that username is
+   account-bound on a logged-in run is `[needs live check]`. (The token
+   reply's own `Set-Cookie` puts the triplet in the jar for ten seconds;
+   that is the site's doing.)
 7. **Relay paths are origin-form.** `@host/x`, `//host/x` and absolute URLs
    are rejected with 400 so the cookie cannot be sent elsewhere.
 8. **Relay state is shared between handler threads.** `_cache`, `_served`
@@ -154,11 +203,14 @@ environment by design; the CLI is the only supported embedding today.
 | `README.md` | user usage, tracking loop, profile forms |
 | `tests/fake_net.py` | fake yt-dlp transport, routes by method/host/path |
 | `tests/fixtures/` | scrubbed fixtures; provenance table in its README |
+| `tests/test_environment.py` | fails if the suite imported an installed copy instead of the checkout |
 | `tests/test_extract.py` | end-to-end extraction against the fake transport |
 | `tests/test_urls.py` | URL forms, reserved routes, profile/stream split |
 | `tests/test_relay.py` | playlist rewrite, window, upstream, ended stream, paths |
-| `tests/test_session.py` | visitor token and check-in behaviour |
-| `tango_chat_recorder.py` | separate chat capture helper, not part of the plugin |
+| `tests/test_session.py` | visitor token, refresh and cool-down behaviour |
+| `install.sh` | symlink installer; refuses a real directory at the link path |
+| `pyproject.toml` | wheel metadata; the wheel holds only `yt_dlp_plugins/` |
+| `contrib/tango_chat_recorder.py` | unused chat sketch for the retired gateway; not part of the plugin |
 | `docs/superpowers/` | earlier design and plan for the recording/hardening round |
 
 `profile.html` in the fixtures is a **stream** page; the name predates
@@ -170,13 +222,18 @@ reconstructions, not literal captures.
 ## 7. Commands
 
 Run the suite with the interpreter that ships with yt-dlp, not the system
-Python, or `yt_dlp` will not import:
+Python, or `yt_dlp` will not import. This is the gate:
 
 ```sh
 cd ~/Projects/tango-yt-dlp-plugin
-PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/2026.10.26/libexec/bin/python \
-    -m unittest discover -s tests
+XDG_CONFIG_HOME="$(mktemp -d)" PYTHONPATH=. \
+  /opt/homebrew/Cellar/yt-dlp/2026.10.26/libexec/bin/python -m unittest discover -s tests
 ```
+
+`XDG_CONFIG_HOME` keeps yt-dlp's plugin finder from importing the installed
+copy under `~/.config/yt-dlp/plugins/` ahead of `PYTHONPATH`; without it
+the suite tests that copy, and `test_the_module_under_test_is_this_checkout`
+fails. 102 tests on 2026-11-21.
 
 The Homebrew path is version-pinned. After `brew upgrade yt-dlp`, refresh it
 with `$(brew --prefix yt-dlp)/libexec/bin/python` or the tests fail on import.
@@ -201,7 +258,7 @@ Recording proof (stop with Ctrl-C; yt-dlp finalises and MP4-fixes):
 
 ```sh
 mkdir -p /tmp/tango-check && cd /tmp/tango-check
-timeout -s INT 30 yt-dlp -f 1 --newline 'https://www.tango.me/@<alias>'
+timeout -s INT 30 yt-dlp -S res --newline 'https://www.tango.me/@<alias>'
 ffprobe -v error -show_entries format=duration:stream=codec_name,width,height \
     -of default=noprint_wrappers=1 ./*.mp4
 ```
@@ -209,7 +266,9 @@ ffprobe -v error -show_entries format=duration:stream=codec_name,width,height \
 A healthy run is 720x1280 (or similar), H.264 + AAC, and no `skipping`
 lines in the log.
 
-Debug switches that matter: `-v` for the extractor's own debug lines,
+Debug switches that matter: `-v` for the extractor's own debug lines (for
+a copied CDN link it prints the URL with its `token=` and `username=`, so do
+not paste that log),
 `--write-pages` to keep the HTML the resolver saw, `--no-warnings` when a
 `--print` check should stay quiet.
 
@@ -259,8 +318,8 @@ findings. The full text is at
 | 14 | test and fixture gaps | fixed: 51 → 59 tests, fixtures documented and shaped from the live page |
 
 Verification after the fixes: 59 offline tests OK; live resolve for alias,
-`@alias`, `%40alias` and account-id forms; account-id URL returns 5832
-followers; offline profile raises the wait hint; 23–38 s recordings with 0
+`@alias`, `%40alias` and account-id forms; account-id URL returns the
+profile's follower count; offline profile raises the wait hint; 23–38 s recordings with 0
 skipped segments.
 
 ### yt-dlp issue #11433 review (2026-11-21)
@@ -279,44 +338,68 @@ without `Accept: application/json`.
 
 Ordered by value, with the exact next step.
 
+0. **Commit and open the PR.** `fix/cdn-url-and-account-session` is a
+   release candidate; commits land next. Split it per the task list in the
+   adversarial-hardening plan, run the gate on each commit, push, and open a
+   PR into `main`.
+
 1. **Followers-only / private streams are unproven.**
    `_watch` maps 401/403 to a message naming `--cookies-from-browser chrome`,
-   but no `isPrivateStream: true` entry has been observed live, so the path
-   has never run against the real site. Next: find such a broadcast, note
-   whether `watch` answers 401, 403 or a `FAILED_*` code, and add a fixture
-   for whichever shape appears.
+   but no `isPrivateStream: true` entry has been observed live, and the
+   cookie restore has not run against the real site (Chrome was signed out
+   when this was written). Next, with a signed-in Chrome:
+   `yt-dlp --cookies-from-browser chrome --cookies after.txt --simulate
+   '<stream-url>'`, then expect 200 from `profiles/v2/me` with `after.txt`
+   (L2 in the plan). Then find a followers-only broadcast, note whether
+   `watch` answers 401, 403 or a `FAILED_*` code, and add a fixture for
+   whichever shape appears. `[needs live check]`
 
 2. **A stream ending mid-recording was not re-observed on the windowed build.**
-   The relay-side behaviour is unit-tested (`test_a_served_media_playlist_
-   that_404s_ends_cleanly`, `test_ends_the_recording_when_the_token_stays_
-   gone`), but the live case was last seen before the playlist window landed.
+   The relay-side behaviour is unit-tested
+   (`test_a_served_media_playlist_that_404s_ends_cleanly`,
+   `test_ends_the_recording_when_the_token_stays_gone`), but the live case
+   was last seen before the playlist window landed.
    Next: start a recording on a short broadcast, let it end, confirm the
    file finalises with the "stream has ended" warning and no error.
+   A single 404 still ends a recording: a 10-minute poll on 2026-11-21 made
+   507 one-second playlist requests, all 200.
 
-3. **Fixtures are scrubbed reconstructions.** They follow the live shapes but
+3. **No CI yet.** Tests run by hand. The repo is public; a short workflow
+   (install yt-dlp, run the gate command from section 7, including
+   `XDG_CONFIG_HOME`) would make the suite a gate instead of a habit.
+
+4. **Deferred from the adversarial plan.** F09 (two-404 confirmation): not
+   built, because the 507-poll measurement saw no transient 404; revisit if
+   one is ever seen. F13 (the relay lingers up to 900 s after a successful
+   `-J`, `-F` or `--simulate`): its own issue. F27 needed evidence only and
+   got it (two `--print timestamp` runs 60 s apart agreed within a second).
+
+5. **Fixtures are scrubbed reconstructions.** They follow the live shapes but
    were not captured byte-for-byte. Next: capture
    `https://www.tango.me/<alias>` and `https://www.tango.me/<account-id>`,
    scrub ids/names/counters per `tests/fixtures/README.md`, replace the two
    profile page fixtures. Keep the three-block JSON-LD layout.
 
-4. **Case sensitivity of aliases is unknown.** `TEST` and `test` are treated
-   as different identifiers. Next: resolve a known alias with different
-   casing; if the site folds case, normalise once in `_resolve_stream_id`
-   and add a test. `[needs live check]`
-
-5. **`no_proxy` is process-wide.** Fine for the CLI, wrong for embedded use.
+6. **`no_proxy` is process-wide.** Fine for the CLI, wrong for embedded use.
    If the plugin is ever imported into a long-lived process, save the old
    value in `_exempt_loopback_from_proxy` and restore it in
    `TangoHlsRelay.close`.
 
-6. **No CI yet.** Tests run by hand. The repo is public; a two-line workflow
-   (install yt-dlp, run `unittest discover`) would make the suite a gate
-   instead of a habit.
-
 7. **yt-dlp issue #11433 is still open upstream.** Whether to post there is
-   an operator decision, not a code change. Accepting a raw
-   `master.m3u8?token=` URL stays out of scope: the token needs a stream id
-   to refresh.
+   an operator decision, not a code change. A copied CDN playlist URL
+   (`master.m3u8?token=`, `live.m3u8?token=` or any `*.m3u8` under
+   `/v2/<hash>/`) is accepted by `TangoCdnIE`: the query is dropped and the
+   path is relayed with a fresh token. No stream id and no `watch` are
+   needed; measured 2026-11-21, a fresh triplet alone gets 200 from master
+   and rendition.
+
+8. **Version floor.** Only yt-dlp 2026.10.26 on CPython 3.15 has run the
+   suite. Next: L14 in the plan (step pinned yt-dlp versions in a venv).
+
+Settled since the last handoff: alias case does not matter. Every case
+variant of an alias resolves to the same account id (measured 2026-11-21),
+so the extractor does not normalise case. Route names (`/Live`,
+`/Stream/<id>`) are now matched case-insensitively.
 
 ## 11. Known traps
 

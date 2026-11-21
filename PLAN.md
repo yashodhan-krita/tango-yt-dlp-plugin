@@ -43,8 +43,10 @@ unexpired `Tango-VT` exists.
 
 `POST /visitors/stream/client/v2/stream/{id}/watch?requestId=`, empty body.
 
-This is mandatory: it authorises the CDN for this visitor. A valid token
-without a prior `watch` still gets 401 from the playlists. It answers JSON
+It registers the viewer and returns the stream document. Corrected
+2026-11-21: it is not an authorisation step. A fresh triplet gets 200 from the
+master and a rendition with no prior `watch`; the 401 this note used to
+record came from a stale token (see `docs/kb/tango-me.md`). It answers JSON
 (`details.stream`, `details.settings`, `details.viewInfo.hlsStreamInfo`,
 `viewerCount`, `status`, `anchor`), even when the site's own player asks for
 protobuf.
@@ -79,9 +81,11 @@ Auth is a cookie triplet on `.tango.me`:
 tt=<token>; ttu=<username>; tte=<expireAt>
 ```
 
-The relay sends the triplet as a plain `Cookie` request header. It is
-deliberately *not* written to yt-dlp's jar: ffmpeg has no jar, so the only
-reader would be unrelated yt-dlp requests to tango.me.
+The relay sends the triplet as a plain `Cookie` request header and does not
+rely on yt-dlp's jar: ffmpeg has no jar. Corrected 2026-11-21: the
+`token-data` reply sets `tt`, `ttu`, `tte` (`Max-Age=10`) and `datadome`
+itself, so they do reach the jar briefly; `_drop_bot_cookies` drops
+`datadome` and `_dd_s` at each session step.
 
 All three are required and `tte` must equal the token's `expireAt` exactly.
 Query parameters (`?tt=`, `?token=`) do **not** authenticate. The token lives
@@ -123,8 +127,8 @@ single-pass and does not loop for live streams.
 master and variant playlists with a fresh token on each request, and rewrites
 media-playlist segment lines to absolute CDN URLs so the video path bypasses
 Python. Child playlists stay on the relay because they need the token. The
-token triplet travels as a request header, never as a jar cookie, so nothing
-leaks into other requests.
+token triplet travels as a request header; the relay never stores it in the
+jar (the token reply's own `Set-Cookie` does, for ten seconds).
 
 **No global cookie-jar monkeypatch.** An earlier version hooked
 `cookiejar.add_cookie_header` to refresh the token before any request. It works,
@@ -138,8 +142,8 @@ line (`--verbose`), not a progress line.
 
 **Replay on throttle, end cleanly on exhaustion.** If the token cannot be
 refreshed, serving the last playlist for up to two minutes is better than
-aborting an hours-long recording; ffmpeg re-requests a few segments and the
-recording continues. Past that, the cached media playlist is served with
+aborting an hours-long recording; ffmpeg sees an unchanged playlist and
+stalls until the token returns, then the recording continues. Past that, the cached media playlist is served with
 `#EXT-X-ENDLIST`, so ffmpeg finalises a playable file instead of the download
 failing.
 
@@ -204,9 +208,10 @@ machine. That fetch is made with `Request(url, proxies={'all':
 - Cut a recording with SIGINT and yt-dlp runs `FixupM3u8`; the `.mp4` is
   playable.
 - Packaging: `tango_yt_dlp_plugin-0.2.0-py3-none-any.whl` installs into a
-  clean venv with yt-dlp 2026.10.26 and registers both extractors
-  (`['tango', 'tango:live']` through a `YoutubeDL` instance's
-  `gen_extractor_classes()`). yt-dlp loads plugins from the `yt_dlp_plugins`
+  clean venv with yt-dlp 2026.10.26 and registered both extractors of the
+  time (`['tango', 'tango:live']` through a `YoutubeDL` instance's
+  `gen_extractor_classes()`). Since `TangoCdnIE` (2026-11-21) there are
+  three: `tango`, `tango:cdn`, `tango:live`. yt-dlp loads plugins from the `yt_dlp_plugins`
   namespace package and does not scan entry points, and newer setuptools
   rejects the hyphenated `[project.entry-points."yt-dlp.extractor"]` group,
   so it is gone from `pyproject.toml`. `--list-extractors` prints before
@@ -219,5 +224,5 @@ machine. That fetch is made with `Request(url, proxies={'all':
   cookie path is preserved for it.
 - Audio rooms (no video) answer `FAILED_BAD_REQUEST` to `watch`; whether they
   expose HLS at all is not decoded.
-- `tango_chat_recorder.py` still targets `wss://gateway.tango.me/ws`; the live
+- `contrib/tango_chat_recorder.py` still targets `wss://gateway.tango.me/ws`; the live
   chat WebSocket has not been decoded.

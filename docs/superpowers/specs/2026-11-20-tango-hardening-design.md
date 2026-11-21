@@ -57,7 +57,7 @@ Tests: `tests/test_relay.py` (playlist rewriting, stale replay, ENDLIST),
   window with no DVR; the data is not there.
 - Audio rooms. `watch` answers `FAILED_BAD_REQUEST`; whether they expose HLS at
   all is undecoded. Improve the message, do not support them.
-- Live chat. `tango_chat_recorder.py` still targets the undecoded
+- Live chat. `contrib/tango_chat_recorder.py` (moved 2026-11-21) still targets the undecoded
   `wss://gateway.tango.me/ws`.
 - Proving the followers-only path. It needs an account that follows a currently
   live broadcaster.
