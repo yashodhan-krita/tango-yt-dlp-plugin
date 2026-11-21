@@ -231,4 +231,6 @@ PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/*/libexec/bin/python -m unittest discov
 - `install.sh` — plugin-dir installer
 - `docs/kb/tango-me.md` — technical knowledge base: contract, failure modes,
   measurements, traps
+- `docs/handoff-2026-11-21-tango-plugin.md` — project handoff: state, open
+  work, commands and known traps
 - `tango_chat_recorder.py` — experimental chat-to-SRT tool (see its header)
