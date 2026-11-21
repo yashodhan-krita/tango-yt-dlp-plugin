@@ -60,6 +60,25 @@ class VisitorResetTest(unittest.TestCase):
         ])
 
 
+class JarLockTest(unittest.TestCase):
+    def test_dropping_cookies_holds_the_jar_lock(self):
+        class LockCheckingJar(http.cookiejar.CookieJar):
+            def clear(self, *args):
+                # RLock._is_owned: whether the calling thread holds it.
+                if not self._cookies_lock._is_owned():
+                    raise AssertionError('jar cleared without its lock')
+                super().clear(*args)
+
+        jar = LockCheckingJar()
+        jar.set_cookie(_cookie('www.tango.me', 'Tango-VT'))
+        jar.set_cookie(_cookie('.www.tango.me', 'Tango-SD'))
+        ie = TangoIE.__new__(TangoIE)
+        ie._downloader = types.SimpleNamespace(cookiejar=jar)
+        ie._reset_visitor()
+        self.assertEqual([(c.domain, c.name) for c in jar],
+                         [('.www.tango.me', 'Tango-SD')])
+
+
 class HasVisitorTokenTest(unittest.TestCase):
     def test_expired_token_needs_a_check_in(self):
         ie, _ = _extractor_with(
@@ -75,9 +94,34 @@ class HasVisitorTokenTest(unittest.TestCase):
         ie, _ = _extractor_with()
         self.assertFalse(ie._has_visitor_token())
 
-    def test_unparseable_token_is_treated_as_usable(self):
-        ie, _ = _extractor_with(_cookie('www.tango.me', 'Tango-VT', 'opaque'))
+    def test_an_unreadable_token_needs_a_check_in(self):
+        def raw(payload):
+            body = base64.urlsafe_b64encode(payload).decode().rstrip('=')
+            return f'h.{body}.sig'
+
+        for value in ('opaque', raw(b'[1, 2]'), raw(b'{"exp": "soon"}'),
+                      raw(b'{"exp": "9999999999"}'), raw(b'{"sub": "x"}'),
+                      raw(b'{"exp": null}'), raw(b'not json'), 'h.!!!.sig'):
+            with self.subTest(value):
+                ie, _ = _extractor_with(_cookie('www.tango.me', 'Tango-VT', value))
+                self.assertFalse(ie._has_visitor_token())
+
+    def test_a_jar_changing_mid_iteration_is_read_again(self):
+        class FlakyJar(http.cookiejar.CookieJar):
+            raised = False
+
+            def __iter__(self):
+                if not self.raised:
+                    self.raised = True
+                    raise RuntimeError('dictionary changed size during iteration')
+                return super().__iter__()
+
+        jar = FlakyJar()
+        jar.set_cookie(_cookie('www.tango.me', 'Tango-VT', _jwt(time.time() + 3600)))
+        ie = TangoIE.__new__(TangoIE)
+        ie._downloader = types.SimpleNamespace(cookiejar=jar)
         self.assertTrue(ie._has_visitor_token())
+        self.assertTrue(jar.raised)
 
 
 class TokenRefreshTest(unittest.TestCase):
@@ -88,6 +132,56 @@ class TokenRefreshTest(unittest.TestCase):
         # False silences yt-dlp; None would print its default note.
         self.assertIs(ie._issue_token.call_args.kwargs['note'], False)
         ie.write_debug.assert_called_once()
+
+    def test_a_token_inside_the_margin_is_refreshed_once(self):
+        ie = mock.Mock()
+        ie._issue_token.return_value = {
+            'token': 'new', 'username': 'u', 'expireAt': time.time() + 3600}
+        refresher = TangoTokenRefresher(ie, 'v')
+        refresher._store('old', 'u', time.time() + refresher.MARGIN / 2)
+        refresher.ensure()
+        refresher.ensure()
+        self.assertEqual(ie._issue_token.call_count, 1)
+        self.assertEqual(refresher.token, 'new')
+
+    def test_a_valid_token_is_not_refreshed(self):
+        ie = mock.Mock()
+        refresher = TangoTokenRefresher(ie, 'v')
+        refresher._store('t', 'u', time.time() + 3600)
+        refresher.ensure()
+        ie._issue_token.assert_not_called()
+
+    def test_a_failed_refresh_cools_down_while_the_token_still_works(self):
+        ie = mock.Mock()
+        ie._issue_token.side_effect = RuntimeError('throttled')
+        refresher = TangoTokenRefresher(ie, 'v')
+        # Inside the margin but unexpired for the length of the test.
+        refresher.MARGIN = 100
+        refresher._store('t', 'u', time.time() + 50)
+        clock = [1000.0]
+        with mock.patch('time.monotonic', lambda: clock[0]):
+            refresher.ensure()
+            self.assertEqual(ie._issue_token.call_count, 1)
+            clock[0] += 1.0
+            refresher.ensure(force=True)       # inside the forced cool-down
+            self.assertEqual(ie._issue_token.call_count, 1)
+            clock[0] += 1.5
+            refresher.ensure(force=True)       # past it
+            self.assertEqual(ie._issue_token.call_count, 2)
+            clock[0] += 4.0
+            refresher.ensure()                 # inside the 5 s cool-down
+            self.assertEqual(ie._issue_token.call_count, 2)
+            clock[0] += 1.5
+            refresher.ensure()
+            self.assertEqual(ie._issue_token.call_count, 3)
+
+    def test_an_expired_token_gets_no_cool_down(self):
+        ie = mock.Mock()
+        ie._issue_token.side_effect = RuntimeError('throttled')
+        refresher = TangoTokenRefresher(ie, 'v')
+        refresher.ensure()
+        refresher.ensure()
+        self.assertEqual(ie._issue_token.call_count, 2)
 
 
 if __name__ == '__main__':

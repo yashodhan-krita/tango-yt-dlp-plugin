@@ -7,22 +7,32 @@ Run with the interpreter that ships with yt-dlp so ``yt_dlp`` is importable::
 
 import email.message
 import io
+import socket
+import struct
+import sys
+import threading
 import time
 import types
 import unittest
+import urllib.request
 from unittest import mock
 
 from yt_dlp.networking import Response
 from yt_dlp.networking.exceptions import HTTPError, TransportError
+from yt_dlp.utils import ExtractorError
 
-from yt_dlp_plugins.extractor.tango import TangoHlsRelay, _end_playlist
+from yt_dlp_plugins.extractor.tango import (
+    TangoHlsRelay,
+    TangoTokenRefresher,
+    _end_playlist,
+)
 
 MASTER = (
     '#EXTM3U\n'
     '#EXT-X-STREAM-INF:BANDWIDTH=2277000,RESOLUTION=1280x720\n'
-    '/v2/a235d4123e1c7c969de1afd213008979/live.m3u8?m=9449563a&tech=lhls\n'
+    '/v2/22222222222222222222222222222222/live.m3u8?m=9449563a&tech=lhls\n'
     '#EXT-X-STREAM-INF:BANDWIDTH=928000,RESOLUTION=640x360\n'
-    'https://cinema-in41.tango.me/v2/acaebe92c7f50d3222021d85c160b41b/live.m3u8?m=9449563a\n'
+    'https://cinema-in41.tango.me/v2/33333333333333333333333333333333/live.m3u8?m=9449563a\n'
 ).encode()
 
 MEDIA = (
@@ -30,9 +40,9 @@ MEDIA = (
     '#EXT-X-VERSION:7\n'
     '#EXT-X-TARGETDURATION:1\n'
     '#EXTINF:1.000,\n'
-    '/v2/sh/a235d4123e1c7c969de1afd213008979/7c4721cacf1ae0c2f50dade662bdcbe4/4950.ts?tech=lhls\n'
+    '/v2/sh/22222222222222222222222222222222/55555555555555555555555555555555/4950.ts?tech=lhls\n'
     '#EXTINF:1.000,\n'
-    'https://cinema-in41.tango.me/v2/sh/a235d4123e1c7c969de1afd213008979/69c931ee/4951.ts?tech=lhls\n'
+    'https://cinema-in41.tango.me/v2/sh/22222222222222222222222222222222/69c931ee/4951.ts?tech=lhls\n'
 ).encode()
 
 MEDIA_PATH = '/v2/hd/live.m3u8?m=x'
@@ -127,8 +137,8 @@ class PlaylistRewriteTest(unittest.TestCase):
             MASTER, 'https://cinema-in41.tango.me/v2/9449563a/master.m3u8').decode()
         uris = [line for line in out.splitlines() if line and not line.startswith('#')]
         self.assertEqual(uris, [
-            '/v2/a235d4123e1c7c969de1afd213008979/live.m3u8?m=9449563a&tech=lhls',
-            '/v2/acaebe92c7f50d3222021d85c160b41b/live.m3u8?m=9449563a',
+            '/v2/22222222222222222222222222222222/live.m3u8?m=9449563a&tech=lhls',
+            '/v2/33333333333333333333333333333333/live.m3u8?m=9449563a',
         ])
 
     def test_media_playlists_point_segments_at_the_cdn(self):
@@ -136,8 +146,8 @@ class PlaylistRewriteTest(unittest.TestCase):
             MEDIA, 'https://cinema-in41.tango.me/v2/hd/live.m3u8?m=x').decode()
         uris = [line for line in out.splitlines() if line and not line.startswith('#')]
         self.assertEqual(uris, [
-            'https://cinema-in41.tango.me/v2/sh/a235d4123e1c7c969de1afd213008979/7c4721cacf1ae0c2f50dade662bdcbe4/4950.ts?tech=lhls',
-            'https://cinema-in41.tango.me/v2/sh/a235d4123e1c7c969de1afd213008979/69c931ee/4951.ts?tech=lhls',
+            'https://cinema-in41.tango.me/v2/sh/22222222222222222222222222222222/55555555555555555555555555555555/4950.ts?tech=lhls',
+            'https://cinema-in41.tango.me/v2/sh/22222222222222222222222222222222/69c931ee/4951.ts?tech=lhls',
         ])
 
 
@@ -352,6 +362,17 @@ class EndedStreamTest(unittest.TestCase):
         self.assertTrue(body.endswith(b'#EXT-X-ENDLIST\n'))
         refresher.ie.report_warning.assert_called_once()
 
+    def test_a_media_playlist_fetched_directly_ends_cleanly_on_404(self):
+        # No master emitted this path; fetching it is what marks it served.
+        relay, _ = relay_with([MEDIA, http_404(), http_404()])
+        self.addCleanup(relay.close)
+        relay.fetch(MEDIA_PATH)
+        status, _, body = relay.fetch(MEDIA_PATH)
+        self.assertEqual(status, 200)
+        self.assertTrue(body.endswith(b'#EXT-X-ENDLIST\n'))
+        with self.assertRaises(HTTPError):
+            relay.fetch('/v2/never/fetched.m3u8')
+
     def test_a_path_the_relay_never_served_still_raises(self):
         relay, _ = relay_with([http_404()])
         self.addCleanup(relay.close)
@@ -365,6 +386,158 @@ class EndedStreamTest(unittest.TestCase):
         relay.fetch(MEDIA_PATH)
         relay.fetch(MEDIA_PATH)
         relay.fetch(MEDIA_PATH)
+        self.assertEqual(len(refresher.ie._downloader.requests), 3)
+
+
+class RecordingTest(unittest.TestCase):
+    def test_an_ended_playlist_is_served_whole_and_a_live_one_is_windowed(self):
+        relay, _ = relay_with([
+            (media_playlist(0, 300) + '#EXT-X-ENDLIST\n').encode(),
+            media_playlist(0, 8).encode(),
+            media_playlist(8, 8).encode(),
+        ])
+        self.addCleanup(relay.close)
+        relay.PLAYLIST_WINDOW = 10
+        _, _, body = relay.fetch('/v2/rec/complete.m3u8')
+        self.assertEqual(segment_numbers(body.decode()), list(range(300)))
+        relay.fetch(MEDIA_PATH)
+        _, _, body = relay.fetch(MEDIA_PATH)
+        self.assertEqual(segment_numbers(body.decode()), list(range(6, 16)))
+
+    def test_a_live_playlist_that_ends_keeps_its_window(self):
+        relay, _ = relay_with([
+            media_playlist(0, 8).encode(),
+            media_playlist(4, 8).encode(),
+            (media_playlist(8, 8) + '#EXT-X-ENDLIST\n').encode(),
+            (media_playlist(0, 60) + '#EXT-X-ENDLIST\n').encode(),
+        ])
+        self.addCleanup(relay.close)
+        relay.fetch(MEDIA_PATH)
+        relay.fetch(MEDIA_PATH)
+        _, _, body = relay.fetch(MEDIA_PATH)
+        # A lagging ffmpeg still finds 0-7 next to the final segments.
+        self.assertEqual(segment_numbers(body.decode()), list(range(16)))
+        self.assertTrue(body.endswith(b'#EXT-X-ENDLIST\n'))
+        # With no window for its path, an ended playlist is not cut to one.
+        _, _, body = relay.fetch('/v2/rec/complete.m3u8')
+        self.assertEqual(segment_numbers(body.decode()), list(range(60)))
+
+
+class ReaperTest(unittest.TestCase):
+    def test_the_idle_reaper_follows_the_monotonic_clock(self):
+        relay, _ = relay_with([])
+        self.addCleanup(relay.close)
+        late = TangoHlsRelay.IDLE_TIMEOUT + 60
+
+        def reap_once():
+            with mock.patch.object(relay._closed, 'wait', side_effect=[False, True]):
+                relay._reap()
+
+        # A wall clock jump (sleep, NTP) is not idleness.
+        with mock.patch('time.time', return_value=time.time() + late):
+            reap_once()
+        self.assertFalse(relay._closed.is_set())
+        with mock.patch('time.monotonic', return_value=time.monotonic() + late):
+            reap_once()
+        self.assertTrue(relay._closed.is_set())
+
+
+class RefreshCooldownTest(unittest.TestCase):
+    def test_a_failing_refresh_is_not_repeated_per_playlist_reload(self):
+        downloader = RecordingDownloader([MASTER] * 11)
+        ie = types.SimpleNamespace(
+            _downloader=downloader, report_warning=mock.Mock(),
+            write_debug=mock.Mock(),
+            _issue_token=mock.Mock(side_effect=RuntimeError('throttled')))
+        refresher = TangoTokenRefresher(ie, 'v')
+        # Inside the refresh margin, but unexpired for the length of the test.
+        refresher.MARGIN = 100
+        refresher._store('t', 'u', time.time() + 50)
+        relay = TangoHlsRelay(
+            refresher, 'https://cinema-in41.tango.me/v2/x/master.m3u8')
+        self.addCleanup(relay.close)
+        clock = [1000.0]
+        with mock.patch('time.monotonic', lambda: clock[0]):
+            for _ in range(10):
+                self.assertEqual(relay.fetch(relay.master_path)[0], 200)
+            self.assertEqual(ie._issue_token.call_count, 1)
+            clock[0] += 6
+            relay.fetch(relay.master_path)
+            self.assertEqual(ie._issue_token.call_count, 2)
+
+
+class RelayHostTest(unittest.TestCase):
+    def test_only_tango_hosts_are_relayed(self):
+        relay = TangoHlsRelay(
+            FakeRefresher(), 'https://cinema-eu3.tango.me/v2/x/master.m3u8')
+        relay.close()
+        for url in ('https://evil.example/v2/x/master.m3u8',
+                    'https://tango.me.evil.example/v2/x/master.m3u8',
+                    'https://eviltango.me/v2/x/master.m3u8'):
+            with self.subTest(url), self.assertRaises(ExtractorError) as ctx:
+                TangoHlsRelay(FakeRefresher(), url)
+            self.assertTrue(ctx.exception.expected)
+
+
+class RelayServerTest(unittest.TestCase):
+    """The relay as ffmpeg sees it: HTTP over a loopback socket."""
+
+    def test_a_client_hanging_up_mid_response_is_quiet(self):
+        relay, _ = relay_with([])
+        self.addCleanup(relay.close)
+        # Large enough that the write cannot fit in the socket buffers.
+        relay.fetch = lambda path: (
+            time.sleep(0.3), (200, 'video/mp2t', b'x' * (16 << 20)))[1]
+        errors, done = [], threading.Event()
+        server = relay._server
+        handle_error, shutdown_request = server.handle_error, server.shutdown_request
+
+        def recording_handle_error(request, client_address):
+            errors.append(sys.exc_info()[1])
+            handle_error(request, client_address)
+
+        def signalling_shutdown_request(request):
+            shutdown_request(request)
+            done.set()
+
+        server.handle_error = recording_handle_error
+        server.shutdown_request = signalling_shutdown_request
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            client = socket.create_connection(('127.0.0.1', relay.port))
+            client.sendall(b'GET /v2/x/live.m3u8 HTTP/1.0\r\n\r\n')
+            # Abort with a reset rather than an orderly close.
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                              struct.pack('ii', 1, 0))
+            client.close()
+            self.assertTrue(done.wait(10))
+        self.assertTrue(errors)
+        self.assertIsInstance(errors[0], ConnectionError)
+        self.assertNotIn('Traceback', stderr.getvalue())
+
+    def test_get_and_head_over_a_socket(self):
+        ended = MEDIA + b'#EXT-X-ENDLIST\n'
+        relay, refresher = relay_with([LIVE_MASTER, LIVE_MASTER, ended])
+        self.addCleanup(relay.close)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(path, method):
+            request = urllib.request.Request(
+                f'http://127.0.0.1:{relay.port}{path}', method=method)
+            with opener.open(request, timeout=10) as response:
+                return (response.status, response.headers['Content-Type'],
+                        response.read())
+
+        playlist = 'application/vnd.apple.mpegurl'
+        status, kind, body = call(relay.master_path, 'GET')
+        self.assertEqual((status, kind), (200, playlist))
+        self.assertIn(MEDIA_PATH.encode(), body)
+        self.assertEqual(call(relay.master_path, 'HEAD'), (200, playlist, b''))
+        status, kind, first = call(MEDIA_PATH, 'GET')
+        self.assertEqual((status, kind), (200, playlist))
+        self.assertIn(b'#EXT-X-ENDLIST', first)
+        self.assertEqual(call(MEDIA_PATH, 'HEAD'), (200, playlist, b''))
+        self.assertEqual(call(MEDIA_PATH, 'GET'), (200, playlist, first))
+        # The ended playlist came from the cache both times after the first.
         self.assertEqual(len(refresher.ie._downloader.requests), 3)
 
 

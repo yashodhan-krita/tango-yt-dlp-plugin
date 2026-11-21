@@ -18,11 +18,13 @@ streams a visitor cannot see; the token refresh still runs on top of it.
 """
 
 import base64
+import contextlib
 import http.server
 import json
 import os
 import re
 import socketserver
+import sys
 import threading
 import time
 import urllib.parse
@@ -66,14 +68,24 @@ class TangoTokenRefresher:
     is therefore re-issued on demand; :class:`TangoHlsRelay` asks for one
     every time ffmpeg reloads a playlist.
 
-    The triplet is sent by the relay as a request header rather than stored in
-    yt-dlp's cookie jar: ffmpeg has no jar, so the jar would only leak the
-    cookies into unrelated requests.
+    The relay sends the triplet in its own ``Cookie`` request header; it does
+    not rely on yt-dlp's cookie jar, which ffmpeg cannot read.  The
+    ``token-data`` reply does set ``tt``/``ttu``/``tte`` (``Max-Age=10``) and
+    ``datadome`` itself, so they do land in the jar briefly;
+    ``_drop_bot_cookies`` removes ``datadome`` and ``_dd_s`` at each session
+    step.
     """
 
     # Refresh this many seconds before the token expires.  The token lives ten
     # seconds and the endpoint is rate limited, so refresh late but not last.
     MARGIN = 2.0
+
+    # After a failed refresh, wait this long before the next attempt while
+    # the cached token still works.  A failing refresh costs three token
+    # calls, a check-in and three seconds of sleeps under the lock, and every
+    # playlist reload would otherwise pay it again.
+    COOLDOWN = 5.0
+    FORCED_COOLDOWN = 2.0
 
     def __init__(self, ie, video_id):
         self.ie = ie
@@ -81,6 +93,7 @@ class TangoTokenRefresher:
         self.expires = 0.0
         self.username = None
         self._token = None
+        self._failed_at = None
         self._lock = threading.Lock()
 
     @property
@@ -103,11 +116,18 @@ class TangoTokenRefresher:
 
     def ensure(self, force=False):
         with self._lock:
-            if not force and time.time() < self.expires - self.MARGIN:
+            now = time.time()
+            if not force and now < self.expires - self.MARGIN:
                 return
+            if self._failed_at is not None and now < self.expires:
+                cooldown = self.FORCED_COOLDOWN if force else self.COOLDOWN
+                if time.monotonic() - self._failed_at < cooldown:
+                    return
             try:
                 self.refresh()
+                self._failed_at = None
             except Exception as err:  # noqa: BLE001 - never break a request over this
+                self._failed_at = time.monotonic()
                 self.ie.report_warning(f'Could not refresh stream token: {err}')
 
 
@@ -191,8 +211,11 @@ class _MediaWindow:
     segment after the last one it played, so a playlist reload that arrives
     late makes it skip whatever slid out in the meantime; ffmpeg logs those
     as ``skipping N segments`` and the recording ends up short.  Serving the
-    union of recent playlists removes the gap: the window is measured in
-    seconds of the stream, so a reload can be up to ``size`` seconds late.
+    union of recent playlists removes the gap.  The relay never polls; it
+    merges only when ffmpeg asks for a playlist, so the window covers ffmpeg
+    running up to about ``size`` seconds behind the live edge, but a gap of
+    more than the CDN's ~8 s window between two reloads still loses the
+    segments in between.
 
     ``size`` is bounded by the CDN's segment retention (measured at ~70 s:
     a segment still downloads at 60 s old and comes back zero-length at 80),
@@ -310,6 +333,13 @@ class _TangoRelayServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        # ffmpeg hanging up mid-response (Ctrl-C, end of input) is routine;
+        # the default handler prints a traceback for it.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
 
 # Hosts ffmpeg reaches the relay on.  Both loopback spellings are listed
 # because the bypass list is matched as text, not resolved.
@@ -350,7 +380,9 @@ class TangoHlsRelay:
 
     # If the token endpoint throttles us, keep ffmpeg alive by replaying the
     # last playlist that did load.  Measured throttles lasted ~90 s, and the
-    # segments in it are public, so replay costs duplicates rather than loss.
+    # window is keyed by media sequence, so ffmpeg sees an unchanged playlist
+    # and stalls until the token returns; segments are lost only if that
+    # takes longer than the CDN keeps them.
     STALE_PLAYLIST_MAX_AGE = 120
 
     # Segments kept in the merged media playlist (one second each).  The CDN
@@ -361,9 +393,17 @@ class TangoHlsRelay:
     def __init__(self, refresher, master_url):
         self.refresher = refresher
         parts = urllib.parse.urlsplit(master_url)
+        # Every upstream request carries the CDN token, and the watch
+        # document names the host, so only tango's own hosts are relayed.
+        if not (parts.hostname or '').endswith('.tango.me'):
+            raise ExtractorError(
+                f'tango.me returned a playlist on another host ({parts.hostname})',
+                expected=True)
         self.upstream = f'{parts.scheme}://{parts.netloc}'
         self.master_path = parts.path + (f'?{parts.query}' if parts.query else '')
-        self._last_request = time.time()
+        # Monotonic, so a laptop that sleeps mid-recording does not wake to
+        # an idle timeout.
+        self._last_request = time.monotonic()
         self._cache = {}
         self._served = set()
         self._windows = {}
@@ -392,7 +432,7 @@ class TangoHlsRelay:
 
     def _reap(self):
         while not self._closed.wait(60):
-            if time.time() - self._last_request > self.IDLE_TIMEOUT:
+            if time.monotonic() - self._last_request > self.IDLE_TIMEOUT:
                 self.close()
                 return
 
@@ -402,7 +442,7 @@ class TangoHlsRelay:
         # the upstream host and could carry the token cookie elsewhere.
         if not path.startswith('/') or path.startswith('//'):
             return 400, 'text/plain', b'bad request path\n'
-        self._last_request = time.time()
+        self._last_request = time.monotonic()
         with self._state:
             cached = self._cache.get(path)
         # A playlist this relay already ended stays ended: the CDN would only
@@ -520,7 +560,12 @@ class TangoHlsRelay:
         if path is None:
             parts = urllib.parse.urlsplit(upstream_url)
             path = parts.path + (f'?{parts.query}' if parts.query else '')
-        text = self._merge_media_playlist(path, text)
+        # A playlist that already ends on first sight is a finished recording:
+        # complete as served, and the live window would cut it.  A live stream
+        # that ends still merges, or a lagging ffmpeg loses the segments
+        # between the last merged reload and this one.
+        if '#EXT-X-ENDLIST' not in text or path in self._windows:
+            text = self._merge_media_playlist(path, text)
 
         def absolute(match):
             prefix, uri, suffix = match.groups()
@@ -559,13 +604,16 @@ class TangoBase(InfoExtractor):
         ``fatal=False`` warns and returns ``None`` when the budget runs out.
         ``fatal=True`` re-raises the last failure as unexpected: yt-dlp marks
         transport errors 'expected' (not a bug in yt-dlp), but for a control
-        call the site is at fault, not the URL.
+        call the site is at fault, not the URL.  401 and 403 are answers,
+        not transient failures, so they are not retried.
         """
         try:
             for retry in self.RetryManager(fatal=fatal):
                 try:
                     return func()
                 except ExtractorError as err:
+                    if getattr(err.cause, 'status', None) in (401, 403):
+                        raise
                     retry.error = err
         except ExtractorError as err:
             raise ExtractorError(
@@ -593,17 +641,38 @@ class TangoBase(InfoExtractor):
     # the throttled one keeps getting 403.
     _VISITOR_COOKIES = {'Tango-VT', 'Tango-SD', 'Tango-DI', 'Tango-DeviceId'}
 
+    # Whether this extractor issued the visitor token itself (a check-in), as
+    # opposed to reusing one found in the jar.
+    _checked_in = False
+
+    def _jar_lock(self):
+        """The jar's own lock: relay threads write it while we read it."""
+        return (getattr(self._downloader.cookiejar, '_cookies_lock', None)
+                or contextlib.nullcontext())
+
+    def _jar_cookies(self):
+        """A snapshot of the shared jar, safe against concurrent writes."""
+        jar = self._downloader.cookiejar
+        with self._jar_lock():
+            try:
+                return list(jar)
+            except RuntimeError:
+                # Every write here takes the lock, so this only covers a jar
+                # without one, changed by another writer mid-iteration.
+                return list(jar)
+
     def _drop_cookies(self, names, keep_domain_prefix=None):
         jar = self._downloader.cookiejar
-        for cookie in list(jar):
-            if cookie.name not in names and cookie.name.lower() not in names:
-                continue
-            if keep_domain_prefix and cookie.domain.startswith(keep_domain_prefix):
-                continue
-            try:
-                jar.clear(cookie.domain, cookie.path, cookie.name)
-            except KeyError:
-                pass
+        with self._jar_lock():
+            for cookie in self._jar_cookies():
+                if cookie.name not in names and cookie.name.lower() not in names:
+                    continue
+                if keep_domain_prefix and cookie.domain.startswith(keep_domain_prefix):
+                    continue
+                try:
+                    jar.clear(cookie.domain, cookie.path, cookie.name)
+                except KeyError:
+                    pass
 
     def _drop_bot_cookies(self):
         self._drop_cookies(self._DROP_COOKIES)
@@ -618,35 +687,74 @@ class TangoBase(InfoExtractor):
         self._drop_cookies(self._VISITOR_COOKIES, keep_domain_prefix='.www.')
 
     def _has_visitor_token(self):
-        """Whether the jar holds an unexpired visitor JWT (``Tango-VT``)."""
-        for cookie in self._downloader.cookiejar:
+        """Whether the jar holds an unexpired visitor JWT (``Tango-VT``).
+
+        A token whose expiry cannot be read is not usable: a check-in is
+        cheaper than a run that fails at ``watch``.
+        """
+        for cookie in self._jar_cookies():
             if cookie.name == 'Tango-VT' and cookie.value:
                 try:
                     payload = cookie.value.split('.')[1]
                     payload += '=' * (-len(payload) % 4)
-                    expires = json.loads(base64.urlsafe_b64decode(payload)).get('exp')
-                except (IndexError, ValueError, json.JSONDecodeError):
-                    return True
-                return not expires or float(expires) > time.time()
+                    expires = json.loads(base64.urlsafe_b64decode(payload))['exp']
+                except (IndexError, KeyError, TypeError, ValueError):
+                    return False
+                if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+                    return False
+                return expires > time.time()
         return False
 
+    def _account_cookies(self):
+        # The account session descriptor is the dot-prefixed Tango-SD; the
+        # visitor one is left to the server.
+        return [
+            cookie for cookie in self._jar_cookies()
+            if cookie.name in ('Tango-ST', 'Tango-RT', 'Tango-WST')
+            or (cookie.name == 'Tango-SD' and cookie.domain.startswith('.www.'))]
+
     def _check_in(self, video_id, note='Registering visitor'):
-        data = self._api_json(
-            '/visitor-lobby/api/public/visitors/v1/check-in', video_id,
-            note=note, query={'appId': 'tango'},
-            data=b'{}', headers={'Content-Type': 'application/json'})
-        if not isinstance(data, dict):
-            raise ExtractorError('tango.me visitor registration failed')
+        # The check-in reply expires the client copies of the account tokens
+        # (epoch Set-Cookie), which would log a --cookies-from-browser session
+        # out before `watch`.  Restored even when the reply is unusable.
+        account = self._account_cookies()
+        try:
+            data = self._api_json(
+                '/visitor-lobby/api/public/visitors/v1/check-in', video_id,
+                note=note, query={'appId': 'tango'},
+                data=b'{}', headers={'Content-Type': 'application/json'})
+            if not isinstance(data, dict):
+                raise ExtractorError('tango.me visitor registration failed')
+            self._checked_in = True
+        finally:
+            self._restore_account_cookies(account)
+
+    def _restore_account_cookies(self, snapshot):
+        """Re-add snapshotted account cookies that are no longer in the jar.
+
+        Only a missing (domain, path, name) is re-added, so a cookie the
+        server rotated in the meantime wins over the snapshot.
+        """
+        jar = self._downloader.cookiejar
+        with self._jar_lock():
+            present = {(c.domain, c.path, c.name) for c in self._jar_cookies()}
+            for cookie in snapshot:
+                if (cookie.domain, cookie.path, cookie.name) not in present:
+                    jar.set_cookie(cookie)
 
     def _ensure_session(self, video_id, force=False):
         """Make sure the cookie jar holds a visitor identity.
 
         The token endpoint is a *visitor* endpoint: even a logged-in browser
-        session has to check in before it can be issued a CDN token.  Account
-        cookies are left untouched, so a private stream still sees them.
+        session has to check in before it can be issued a CDN token.  The
+        check-in expires the account cookies, so they are restored after it
+        and a private stream still sees them.
         """
         self._drop_bot_cookies()
         if not force and self._has_visitor_token():
+            # The instance outlives a run (--wait-for-video re-extracts), so
+            # an earlier run's check-in must not disable _watch's self-heal.
+            self._checked_in = False
             return
         if force:
             self._reset_visitor()
@@ -660,6 +768,14 @@ class TangoBase(InfoExtractor):
         check-in gets a token where retrying the throttled identity does not,
         so the second attempt resets it.  Errors are swallowed here and
         reported once by the caller, to keep the log readable.
+
+        The account cookies are left in the jar.  This runs on a daemon relay
+        thread every few seconds, so taking them out and restoring them would
+        leave a window in which a Ctrl-C saves a --cookies file without them.
+        The endpoint is a visitor endpoint, the measured cure for a 403 is a
+        fresh visitor identity (``_reset_visitor``), and with the account
+        cookies an account-bound token can be issued, which a followers-only
+        stream may need.  Whether they change the 403 recovery is unmeasured.
         """
         last_error = None
         for attempt in range(3):
@@ -760,21 +876,26 @@ class TangoBase(InfoExtractor):
     def _watch(self, stream_id, *, profile=None):
         """Register as a viewer and return the stream document.
 
-        This call is what authorises the CDN; without it the playlists answer
-        401 even with a valid token.
+        A visitor token reused from the jar can be unexpired yet refused by
+        the server, so a 401 or 403 for one re-registers once and retries
+        before blaming the stream's visibility.
         """
-        try:
-            data = self._retry(lambda: self._api_json(
-                f'/visitors/stream/client/v2/stream/{stream_id}/watch', stream_id,
-                note='Joining stream', query={'requestId': ''},
-                data=b'', headers={'Content-Type': 'application/json'}))
-        except ExtractorError as err:
-            if getattr(err.cause, 'status', None) in (401, 403):
-                raise ExtractorError(
-                    'tango.me refused the stream lookup. For a followers-only or '
-                    'private stream, retry with --cookies-from-browser chrome',
-                    expected=True, cause=err) from err
-            raise
+        for attempt in range(2):
+            try:
+                data = self._retry(lambda: self._api_json(
+                    f'/visitors/stream/client/v2/stream/{stream_id}/watch',
+                    stream_id, note='Joining stream', query={'requestId': ''},
+                    data=b'', headers={'Content-Type': 'application/json'}))
+                break
+            except ExtractorError as err:
+                if getattr(err.cause, 'status', None) not in (401, 403):
+                    raise
+                if attempt or self._checked_in:
+                    raise ExtractorError(
+                        'tango.me refused the stream lookup. For a followers-only '
+                        'or private stream, retry with --cookies-from-browser chrome',
+                        expected=True, cause=err) from err
+                self._ensure_session(stream_id, force=True)
         if not isinstance(data, dict):
             raise ExtractorError('tango.me stream lookup failed', expected=True)
         code = data.get('code')
@@ -871,10 +992,31 @@ class TangoBase(InfoExtractor):
                     body, playlist_url, ext='mp4', live=live, fatal=False,
                     video_id=video_id)
         for f in formats:
+            # 'm3u8' selects ffmpeg, which honours no_proxy.  The parser's
+            # 'm3u8_native' lets yt-dlp pick its native HLS downloader for a
+            # recording, and that sends the loopback relay through --proxy.
+            f['protocol'] = 'm3u8'
             f['http_headers'] = dict(f.get('http_headers') or {}, **{
                 'Origin': 'https://www.tango.me',
                 'Referer': 'https://www.tango.me/',
             })
+        return formats, subtitles
+
+    def _relayed_formats(self, refresher, playlist_url, video_id, live, error):
+        """Serve ``playlist_url`` through a new relay and read its formats.
+
+        The relay must keep serving ffmpeg when extraction succeeds, so it is
+        only closed here when we are about to leave without returning.
+        """
+        relay = TangoHlsRelay(refresher, playlist_url)
+        try:
+            _exempt_loopback_from_proxy()
+            formats, subtitles = self._hls_formats(relay.url(), video_id, live=live)
+            if not formats:
+                raise ExtractorError(error, expected=True)
+        except BaseException:
+            relay.close()
+            raise
         return formats, subtitles
 
     # ---------------------------------------------------------------- shared
@@ -931,24 +1073,14 @@ class TangoBase(InfoExtractor):
         sep = '&' if '?' in master_url else '?'
         master_url = f'{master_url}{sep}accountId=&tech=lhls&label=pwatcf'
         if refresher.username:
-            master_url = f'{master_url}&username={refresher.username}'
-        relay = TangoHlsRelay(refresher, master_url)
-        # The relay must keep serving ffmpeg when extraction succeeds, so it is
-        # only closed here when we are about to leave without returning.
-        try:
-            _exempt_loopback_from_proxy()
-            formats, subtitles = self._hls_formats(
-                relay.url(), stream_id, live=is_live)
-            if not formats:
-                kind = 'live stream' if is_live else 'recording'
-                raise ExtractorError(
-                    f'The {kind} HLS manifest could not be read. '
-                    'For a followers-only or private stream retry with '
-                    '--cookies-from-browser chrome',
-                    expected=True)
-        except BaseException:
-            relay.close()
-            raise
+            master_url = (f'{master_url}&username='
+                          f'{urllib.parse.quote(refresher.username, safe="")}')
+        kind = 'live stream' if is_live else 'recording'
+        formats, subtitles = self._relayed_formats(
+            refresher, master_url, stream_id, is_live,
+            f'The {kind} HLS manifest could not be read. '
+            'For a followers-only or private stream retry with '
+            '--cookies-from-browser chrome')
 
         title = f'{name} (@{alias})' if alias and alias != name else name
         if is_live:
@@ -984,6 +1116,8 @@ class TangoBase(InfoExtractor):
             'concurrent_view_count': int_or_none(details.get('viewerCount')),
             'view_count': int_or_none(details.get('uniqueViewerCount')),
             'tags': traverse_obj(details, ('tags', ...)),
+            # Policy, not payload: six catalog items sampled on 2026-11-21 all
+            # had isNsfw false and moderationLevel 2, so nothing to derive from.
             'age_limit': 18,
         }
         # The watch document reports how long the broadcast has been running,
@@ -1001,7 +1135,7 @@ class TangoFeedIE(TangoBase):
     """tango.me/live — the front-page feed of currently live streams."""
 
     IE_NAME = 'tango:live'
-    _VALID_URL = r'https?://(?:www\.|m\.)?tango\.me/live/?(?:[?#]|$)'
+    _VALID_URL = r'https?://(?:www\.|m\.)?tango\.me/(?i:live)/?(?:[?#]|$)'
     _TESTS = [{
         'url': 'https://www.tango.me/live',
         'info_dict': {'id': 'live'},
@@ -1034,31 +1168,31 @@ class TangoFeedIE(TangoBase):
 
 class TangoIE(TangoBase):
     IE_NAME = 'tango'
+    # Route names are matched case-insensitively (the site folds them);
+    # aliases keep their case.  ``/v2/<hash>/`` on the site host is the SPA,
+    # not the CDN and not an alias.
     _VALID_URL = (
         r'https?://(?:www\.|m\.)?tango\.me/'
-        r'(?:(?P<kind>stream|live|profile)/)?'
-        r'(?!(?:live|stream|profile|search|explore|login|signup|gifts|store|settings|wallet)'
+        r'(?!v2/[0-9a-fA-F]{32}/)'
+        r'(?:(?P<kind>(?i:stream|live|profile))/)?'
+        r'(?!(?i:live|stream|profile|search|explore|login|signup|gifts|store|settings|wallet)'
         r'(?:[/?#]|$))'
         r'(?P<id>[^/?#&]+)')
+    # Fake ids (tests/fake_net.py): no live stream is stable enough to pin.
     _TESTS = [{
-        'url': 'https://www.tango.me/stream/jBLKPPFpEsXV2S2C7nC39A',
-        'info_dict': {
-            'id': 'jBLKPPFpEsXV2S2C7nC39A',
-            'ext': 'mp4',
-            'is_live': True,
-        },
-        'params': {'skip_download': True},
-    }, {
-        'url': 'https://www.tango.me/wisdomhood',
+        'url': 'https://www.tango.me/stream/AAAABBBBCCCCDDDDEEEEFF',
         'only_matching': True,
     }, {
-        'url': 'https://www.tango.me/@wisdomhood',
+        'url': 'https://www.tango.me/tango_tester',
         'only_matching': True,
     }, {
-        'url': 'https://www.tango.me/profile/wisdomhood',
+        'url': 'https://www.tango.me/@tango_tester',
         'only_matching': True,
     }, {
-        'url': 'https://www.tango.me/live/jBLKPPFpEsXV2S2C7nC39A',
+        'url': 'https://www.tango.me/profile/tango_tester',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.tango.me/live/AAAABBBBCCCCDDDDEEEEFF',
         'only_matching': True,
     }]
 
@@ -1072,4 +1206,63 @@ class TangoIE(TangoBase):
                 expected=True)
         return self._extract_stream(
             url, match.group('id'),
-            is_profile=match.group('kind') not in ('stream', 'live'))
+            is_profile=(match.group('kind') or '').lower() not in ('stream', 'live'))
+
+
+class TangoCdnIE(TangoBase):
+    """A CDN playlist URL copied out of the browser's network tab.
+
+    yt-dlp issue #11433 documents this as the workaround for a site with no
+    extractor: copy a ``master.m3u8?token=...`` request and hand it over.  The
+    copied link dies with the browser's ten-second token, so it is served
+    through the same relay as a resolved stream.
+
+    Nothing in the copied URL names the broadcaster, and the token endpoint is
+    not stream-scoped, so no lookup is made: a visitor check-in plus a fresh
+    token authorises the copied path.  Measured 2026-11-21: master and
+    rendition answer 200 with a fresh triplet and no prior ``watch``
+    (``test_a_copied_cdn_url_is_authorised_by_the_triplet_alone``).
+    """
+
+    IE_NAME = 'tango:cdn'
+    # The site hosts are excluded so only one extractor owns a URL.  Any
+    # playlist name is accepted because the CDN does not validate it.
+    _VALID_URL = (
+        r'https?://(?!(?:www|m)\.)[a-z0-9-]+\.tango\.me/v2/'
+        r'(?P<id>[0-9a-fA-F]{32})/[a-z0-9_]+\.m3u8(?:[?#]|$)')
+    _TESTS = [{
+        'url': 'https://cinema-in41.tango.me/v2/0123456789abcdef0123456789abcdef'
+               '/live.m3u8?token=expired&username=expired',
+        'only_matching': True,
+    }]
+
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+        self._ensure_session(video_id)
+        refresher = TangoTokenRefresher(self, video_id)
+        refresher.ensure(force=True)
+        if not refresher.token:
+            raise ExtractorError(
+                'tango.me did not issue a CDN token; retry the download',
+                expected=True)
+        parts = urllib.parse.urlsplit(url)
+        # The query is dropped: its token expires in about ten seconds and the
+        # CDN authorises on the cookie triplet instead.  The path is kept as
+        # copied, because the file name is what selects the variant list (the
+        # master hash) or one rendition (a rendition hash).
+        playlist_url = f'{parts.scheme}://{parts.netloc}{parts.path}'
+        formats, subtitles = self._relayed_formats(
+            refresher, playlist_url, video_id, True,
+            'The CDN playlist could not be read; the stream has probably '
+            'ended. A followers-only stream needs --cookies-from-browser chrome')
+        return {
+            'id': video_id,
+            'title': f'Tango live {video_id}',
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+            'live_status': 'is_live',
+            'age_limit': 18,
+            # Query-free, so the copied token and username never reach tags.
+            'webpage_url': playlist_url,
+        }
