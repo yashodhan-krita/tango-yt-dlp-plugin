@@ -18,6 +18,8 @@ profile URL so the same command works across separate broadcasts.
 - Installed as a plugin at
   `~/.config/yt-dlp/plugins/tango-yt-dlp/yt_dlp_plugins`, symlinked to this
   repo. Edits are live in the next `yt-dlp` run; no reinstall needed.
+- Public repo: <https://github.com/yashodhan-krita/tango-yt-dlp-plugin>.
+  Licence: Unlicense, the same as yt-dlp; see `LICENSE`.
 - No yt-dlp core code is patched. Keep it that way unless a core bug forces
   it, and record why if it ever happens.
 
@@ -217,9 +219,13 @@ a0ba6e6 docs: record the playlist window, retention and live proof
 2ca14e6 fix: serve a merged playlist window instead of the CDN's 8 segments
 ```
 
-There is no git remote configured; merges were local fast-forwards. The
-feature branch was deleted after the merge. If a remote is added later, push
-`main` and use the stacked-PR rules from `~/.agent-workflow-rules.md`.
+There is a public remote now: `origin` is
+`https://github.com/yashodhan-krita/tango-yt-dlp-plugin.git`, and `main`
+tracks `origin/main`. Commits up to `cc54b97` were authored under the
+`yashodhank` identity; the repo-local identity was switched to
+`yashodhan-krita` for the documentation and licence commits. Future work
+follows the stacked-PR rules in `~/.agent-workflow-rules.md`: branch, commit,
+push, PR, merge when green.
 
 ## 9. Review status
 
@@ -284,9 +290,9 @@ Ordered by value, with the exact next step.
    value in `_exempt_loopback_from_proxy` and restore it in
    `TangoHlsRelay.close`.
 
-6. **No remote / no CI.** Tests run by hand. Adding a remote and a two-line
-   workflow (install yt-dlp, run `unittest discover`) would make the suite a
-   gate instead of a habit.
+6. **No CI yet.** Tests run by hand. The repo is public; a two-line workflow
+   (install yt-dlp, run `unittest discover`) would make the suite a gate
+   instead of a habit.
 
 ## 11. Known traps
 
