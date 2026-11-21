@@ -1,7 +1,7 @@
 # Tango.me extractor: offline harness and hardening
 
 Date: 2026-11-20
-Status: proposed
+Status: implemented (branch head `053b07b`, merged to `main` at `a0ba6e6`)
 Supersedes nothing; extends `PLAN.md` and `README.md`.
 
 ## Intent

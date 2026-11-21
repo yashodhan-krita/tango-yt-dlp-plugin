@@ -1,7 +1,9 @@
 # Implementation notes
 
 Design record for the tango.me extractor. Usage lives in `README.md`; this is
-the decoded contract and the reasoning behind the code.
+the decoded contract and the reasoning behind the code. It records the
+2026-11-20 build; profile tracking and the review fixes are newer, and
+`docs/kb/tango-me.md` is the up-to-date contract.
 
 ## API contract (verified against the live site)
 
@@ -53,8 +55,8 @@ id, `FAILED_BAD_REQUEST` for some stream kinds (audio rooms).
 ### Aliases
 
 - `GET /visitors/profilealias/api/alias/convert?alias=X` → the 22-char
-  encrypted account id as plain text, or an empty body with HTTP 200 when the
-  alias does not exist.
+  encrypted account id as plain text, or an empty body with HTTP 200 (or a
+  404) when the alias does not exist or the value is an account id.
 - `GET /showroom-streams/api/public/stream/v1/id?broadcasterId=<account>` →
   stream id, or HTTP 404 when the profile is offline.
 

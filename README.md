@@ -38,6 +38,7 @@ yt-dlp -f 1 "https://www.tango.me/live/jBLKPPFpEsXV2S2C7nC39A"
 yt-dlp -f 1 "https://www.tango.me/wisdomhood"
 yt-dlp -f 1 "https://www.tango.me/profile/wisdomhood"
 yt-dlp -f 1 "https://www.tango.me/@wisdomhood"
+yt-dlp -f 1 "https://www.tango.me/profile/<account-id>"
 ```
 
 `tango.me/<alias>` and the shared `tango.me/@<alias>` form are looked up
@@ -79,8 +80,9 @@ mean the stream id itself.
 
 A profile URL always means *the current live stream*. If the broadcast ends
 between resolution and lookup, it reports `not live` so `--wait-for-video`
-keeps waiting. A `/stream/<id>` URL keeps the older behaviour and falls back
-to the stream's finished recording.
+keeps waiting. A `/stream/<id>` URL is the archival form: if `watch` still
+returns the stream's `completeListUrl`, that finished recording is downloaded;
+once tango removes the stream, it reports `not live` too.
 
 Stop a recording with Ctrl-C. yt-dlp finalises the file and MP4-fixes it.
 
@@ -128,7 +130,9 @@ yt-dlp -f 1 --cookies-from-browser chrome "https://www.tango.me/<alias>"
 
 The extractor still performs the site's visitor check-in, because the CDN token
 endpoint only issues tokens to a visitor identity. Account cookies are left in
-place for the stream lookup, so private access is preserved.
+place for the stream lookup, so private access is preserved. This path is
+implemented but has not yet been proven end to end against a real
+followers-only broadcast (see the handoff).
 
 ## How it works
 
@@ -184,9 +188,12 @@ rather than the recording failing.
   comfortably inside the budget.
 - **Viewer count.** Calling `watch` adds one viewer, so the reported
   `concurrent_view_count` includes this download.
-- **Ended streams.** Tango drops a stream from every route once it ends: the
-  profile stream lookup 404s and `watch` answers `FAILED_TERMINATED`, with no
-  HLS URL left anywhere. A download has to start while the stream is live.
+- **Ended streams.** Tango drops a stream from its routes shortly after the
+  end: the profile stream lookup 404s and `watch` answers
+  `FAILED_TERMINATED`, with no HLS URL left anywhere. A fresh download
+  normally has to start while the stream is live; the `completeListUrl`
+  fallback only covers the short window after the end in which `watch` still
+  returns the recording.
   If a stream ends *during* a recording, the CDN starts answering 404 or 410
   for playlists the relay had already served; the relay marks the last one
   with `#EXT-X-ENDLIST`, so ffmpeg finalises a playable file instead of the
@@ -234,3 +241,8 @@ PYTHONPATH=. /opt/homebrew/Cellar/yt-dlp/*/libexec/bin/python -m unittest discov
 - `docs/handoff-2026-11-21-tango-plugin.md` — project handoff: state, open
   work, commands and known traps
 - `tango_chat_recorder.py` — experimental chat-to-SRT tool (see its header)
+
+## License
+
+[Unlicense](LICENSE) — public domain, the same licence as yt-dlp itself.
+Use it, change it, ship it, no attribution required.

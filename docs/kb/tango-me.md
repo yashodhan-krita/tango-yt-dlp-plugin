@@ -1,9 +1,9 @@
 # tango.me live streams: technical knowledge base
 
-Last verified 2026-11-20 against the live site and yt-dlp 2026.10.26.
-This note is the durable record: the contract, the measured behaviour, the
-traps, and how to check each claim again. `PLAN.md` is the shorter design
-record; `README.md` is for users.
+Last verified 2026-11-20 against the live site and yt-dlp 2026.10.26;
+profile tracking re-verified 2026-11-21. This note is the durable record: the
+contract, the measured behaviour, the traps, and how to check each claim
+again. `PLAN.md` is the shorter design record; `README.md` is for users.
 
 ## What this covers
 
@@ -38,7 +38,7 @@ anything targeting it is dead code.
 | Check-in | `POST /visitor-lobby/api/public/visitors/v1/check-in?appId=tango`, body `{}` | Sets `Tango-VT` (visitor JWT, ~30 days), `Tango-SD`, `Tango-DeviceId` |
 | Watch | `POST /visitors/stream/client/v2/stream/{id}/watch?requestId=` | Mandatory viewer registration; returns `details.stream`, `settings`, `viewInfo.hlsStreamInfo`, `status`, `anchor` |
 | Token | `GET /stream/token-data/v1/web/visitor` | `{token, username, expireAt}`, ten-second TTL |
-| Alias | `GET /visitors/profilealias/api/alias/convert?alias=X` | 22-char account id as plain text; empty body with HTTP 200 when absent |
+| Alias | `GET /visitors/profilealias/api/alias/convert?alias=X` | 22-char account id as plain text; empty body (200) or 404 when absent, including when the value is an account id |
 | Stream id | `GET /showroom-streams/api/public/stream/v1/id?broadcasterId=<account>` | stream id, or 404 when offline |
 | Feed | `POST /showroom-streams/api/public/web/catalog/v1?traceId=<uuid>` | `catalogItems[].encryptedStreamId` |
 
@@ -190,6 +190,15 @@ sets `Domain=www.tango.me`, the standard library stores them as
 - The relay refreshes the token itself. `MARGIN = 2` seconds means a refresh
   about every eight seconds, not every six: a third fewer calls to a
   rate-limited endpoint.
+- Only origin-form request paths are served. `@host/x`, `//host/x` and
+  absolute URLs answer `400`, because concatenating them onto the upstream
+  host could carry the token cookie to another host.
+- The handler has a 30-second socket timeout, and cache, served-path and
+  playlist-window state are mutated under one `RLock`; `ThreadingMixIn`
+  serves each request on its own thread.
+- `close()` sets a `threading.Event`; the reaper waits on it in 60-second
+  steps, so a closed relay stops both threads instead of sleeping out the
+  idle timeout.
 
 Earlier approaches and why they were dropped:
 
@@ -249,10 +258,12 @@ Two details matter:
   replay test passed while exercising the wrong path until the final review.
 
 The `FAILED_TERMINATED` mapping is only reachable when the stream ended
-before the download started. Once a stream ends, tango removes it from every
-route: `watch` answers `FAILED_TERMINATED` with no details, the profile
-lookup 404s, and the page has no HLS URL. A finished stream cannot be
-downloaded.
+before the download started. Tango removes a stream from its routes shortly
+after the end: `watch` answers `FAILED_TERMINATED` with no details, the
+profile lookup 404s, and the page has no HLS URL. A `/stream/<id>` URL keeps
+a `completeListUrl` fallback for the short window in which `watch` still
+returns the finished recording; once the route is gone, only "not live"
+remains.
 
 ## Measured limits
 
@@ -294,6 +305,22 @@ Two details from those runs:
   starts one or two seconds later; it is not a failure.
 - The Chrome run picked the 360x640 rendition with `-f 1` because that master
   listed the low variant first. The manifest order is not quality order.
+
+### Profiles and tracking (2026-11-20/21)
+
+The profile path was verified live against `@tara-48761`
+(account `blXcQ51K9xaLdfxdUI4CMg`, stream `DLkjJkO4XSpVj4M_pjWXAg`):
+
+| Run | Result |
+| --- | --- |
+| `@tara-48761`, `/profile/blXcQ51K9xaLdfxdUI4CMg`, `%40tara-48761` | all resolve to the same stream id; metadata is `Tara✨`, alias `tara-48761`, account `blXcQ51K9xaLdfxdUI4CMg`, 5832 followers |
+| Account-id profile URL after the metadata fix | returns 5832 followers, `channel_id` and the bio from the account's `ProfilePage` |
+| Offline profile (`/profile/XEi4…`) | `UserNotLive`, message names the profile and `--wait-for-video`; no relay is built |
+| Recordings from `/profile/tara-48761` and `@tara-48761` | 37.6 s, 27.4 s, 23.4 s; 720x1280 H.264 + AAC; 0 skipped segments |
+
+An account-id profile page is the same `ProfilePage` as the alias page, with
+`identifier` set to the account id; reading it is what keeps followers and
+bio for `/profile/<account-id>` inputs.
 
 ### Playlist window (2026-11-20, later)
 
@@ -372,7 +399,9 @@ Traps that cost time:
   per-request proxy bypass is enough.
 - Fixtures: only `watch.json` came from a live capture. The rest are
   reconstructed from the contract in `PLAN.md`, with fixed scrubbed ids.
-  `tests/fixtures/README.md` records which is which.
+  `tests/fixtures/README.md` records which is which. The two
+  `profile_page*.html` fixtures mirror the live three-block JSON-LD
+  (Organization, WebSite, ProfilePage) rather than a byte capture.
 - A test that forces retries prints `RetryManager` warnings by design. Build
   the downloader with `params={'no_warnings': True}` where the warning is not
   the thing under test.
@@ -421,6 +450,12 @@ master fetch went through the proxy: it needs its per-request
 - Followers-only and private streams are implemented but not proven end to
   end; that needs an account that follows a live broadcaster. Three catalog
   pulls (60 entries) contained no `isPrivateStream: true` entry.
+- Alias case sensitivity is unknown. The extractor passes the identifier
+  through unchanged, so `Alias` and `alias` are different inputs until a
+  live check proves the site folds them.
+- The two profile page fixtures follow the live JSON-LD shape but are
+  scrubbed reconstructions. A literal capture would pin the exact block
+  order and field set.
 - Segment retention is measured from one CDN edge (`cinema-in41`): full at
   60 s old, zero-length at 80 s. Other edges may differ, which is why the
   window cap leaves 25 s of margin rather than sitting at the retention edge.

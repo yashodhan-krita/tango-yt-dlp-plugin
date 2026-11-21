@@ -1,5 +1,9 @@
 # Tango.me Extractor Hardening Implementation Plan
 
+> **Status:** executed on 2026-11-20 (branch head `053b07b`, merged at
+> `a0ba6e6`). The checkboxes are left as written for the historical record;
+> the profile round that followed is in `docs/handoff-2026-11-21-tango-plugin.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `_extract_stream` run and fail predictably without the network, then fix the retry, ending, logging, proxy and metadata defects the offline harness exposes.

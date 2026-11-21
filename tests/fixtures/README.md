@@ -7,8 +7,8 @@ check-in-cookie-jar captures (`curl -c jar.txt -b jar.txt`).  Ids, names,
 thumbnails and CDN hashes use the fixed values in `tests/fake_net.py`
 (`STREAM_ID`, account id `GGGGHHHHIIIIJJJJKKKKLL`, CDN
 `cinema-in41.tango.me`, hashes `'1' * 32` / `'2' * 32` / `'3' * 32`).  No
-tokens, account ids or personal data are stored here; `check_in` replies its
-cookies through the route table in `base_routes()` instead of the fixture
+real tokens, account ids or personal data are stored here; `check_in` replies
+its cookies through the route table in `base_routes()` instead of the fixture
 file.
 
 | File | Method and URL | Request body |
