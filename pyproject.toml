@@ -5,6 +5,11 @@ description = "yt-dlp extractor plugin for tango.me live streams"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["yt-dlp>=2024.0.0"]
+license = { text = "Unlicense" }
+classifiers = [
+    "License :: OSI Approved :: The Unlicense (Unlicense)",
+    "Programming Language :: Python :: 3",
+]
 
 [tool.setuptools.packages.find]
 include = ["yt_dlp_plugins*"]
