@@ -34,6 +34,7 @@ ACCOUNT_ID = 'GGGGHHHHIIIIJJJJKKKKLL'
 _MASTER_HASH = '1' * 32
 _HD_HASH = '2' * 32
 _LD_HASH = '3' * 32
+LIVE_HASH = '4' * 32
 
 _FIXTURES = Path(__file__).resolve().parent / 'fixtures'
 
@@ -57,25 +58,47 @@ def fixture_reply(name: str, *, status: int = 200, headers=()) -> Reply:
     return Reply(fixture(name), status, tuple(headers))
 
 
+CHECK_IN = ('POST', 'www.tango.me',
+            '/api/visitor-lobby/api/public/visitors/v1/check-in')
+TOKEN = ('GET', 'www.tango.me', '/api/stream/token-data/v1/web/visitor')
+WATCH = ('POST', 'www.tango.me',
+         f'/api/visitors/stream/client/v2/stream/{STREAM_ID}/watch')
+
+_EPOCH = 'Expires=Thu, 01 Jan 1970 00:00:10 GMT'
+RT_REFRESH_PATHS = ('/api/session-service/public/v2/session/web/refresh',
+                    '/session-service/public/v2/session/web/refresh')
+
+
+def check_in_reply(visitor_token: str = 'visitor-token',
+                   body: bytes | None = None) -> Reply:
+    return Reply(fixture('check_in.json') if body is None else body, 200, (
+        # Host-only cookies, like the real check-in response: the visitor
+        # identity lands on ``www.tango.me`` (no leading dot), separate from
+        # the account session on ``.www.tango.me``.
+        ('Set-Cookie', f'Tango-VT={visitor_token}; Path=/'),
+        ('Set-Cookie', 'Tango-SD=visitor-session; Path=/'),
+        # Measured live on 2026-11-21 with a logged-in Chrome profile: the
+        # check-in also expires the account tokens, host-only, with these
+        # paths.  It does not expire Tango-ST.
+        ('Set-Cookie', f'Tango-WST=; Path=/; {_EPOCH}'),
+        ('Set-Cookie', f'Tango-SD=; Path=/; {_EPOCH}'),
+        ('Set-Cookie', f'Tango-RT=; Path=/; {_EPOCH}'),
+        *(('Set-Cookie', f'Tango-RT=; Path={path}; {_EPOCH}')
+          for path in RT_REFRESH_PATHS),
+        ('Content-Type', 'application/json')))
+
+
 def base_routes() -> dict[tuple[str, str, str], Reply | list[Reply]]:
     """Every request the offline extraction path can make.
 
-    The three CDN playlist routes exist because the HLS relay fetches its
+    The CDN playlist routes exist because the HLS relay fetches its
     upstream playlists through the downloader, and the CDN host ends in
     ``tango.me`` so those requests arrive here too.
     """
     json_type = (('Content-Type', 'application/json'),)
     m3u8_type = (('Content-Type', 'application/vnd.apple.mpegurl'),)
     return {
-        ('POST', 'www.tango.me',
-         '/api/visitor-lobby/api/public/visitors/v1/check-in'): fixture_reply(
-             'check_in.json', headers=(
-                 # Host-only cookies, like the real check-in response: the
-                 # visitor identity lands on ``www.tango.me`` (no leading dot),
-                 # separate from the account session on ``.www.tango.me``.
-                 ('Set-Cookie', 'Tango-VT=visitor-token; Path=/'),
-                 ('Set-Cookie', 'Tango-SD=visitor-session; Path=/'),
-                 ('Content-Type', 'application/json'))),
+        CHECK_IN: check_in_reply(),
         ('GET', 'www.tango.me',
          '/api/stream/token-data/v1/web/visitor'): fixture_reply(
              'token.json', headers=json_type),
@@ -101,11 +124,33 @@ def base_routes() -> dict[tuple[str, str, str], Reply | list[Reply]]:
             'hd.m3u8', headers=m3u8_type),
         ('GET', CDN, f'/v2/{_LD_HASH}/ld.m3u8'): fixture_reply(
             'ld.m3u8', headers=m3u8_type),
+        # A rendition copied from the browser: the CDN ignores the file name
+        # and serves that hash's media playlist for any ``*.m3u8``.
+        ('GET', CDN, f'/v2/{LIVE_HASH}/live.m3u8'): fixture_reply(
+            'hd.m3u8', headers=m3u8_type),
     }
 
 
+def cookie_names(header: str) -> set[str]:
+    return {part.split('=', 1)[0].strip() for part in header.split(';') if '=' in part}
+
+
 class FakeRH(RequestHandler):
-    """Serves ``self.routes`` for tango.me hosts, falls through otherwise."""
+    """Serves ``self.routes`` for tango.me hosts, falls through otherwise.
+
+    It enforces the request contract measured on 2026-11-21 and answers 401
+    where the site would: the token needs the visitor cookie and the site
+    Referer, a CDN playlist needs the ``tt``/``ttu``/``tte`` triplet and the
+    Referer, and ``watch`` needs ``Accept: application/json``.  The feed
+    catalog needs the visitor cookie (assumed, not measured).  ``watch`` is
+    not a precondition for a playlist (measured); ``require_watch`` lets a
+    test switch that alternative rule on.
+
+    "A tampered ``tt`` gets 401" is a live measurement recorded in
+    ``docs/kb/tango-me.md``; this fake does not model it.  It checks only
+    that the triplet is present; a test that cares about the values sets
+    them itself and asserts them on the recorded request.
+    """
 
     RH_KEY = 'Fake'
     _SUPPORTED_URL_SCHEMES = ('http', 'https')
@@ -116,6 +161,31 @@ class FakeRH(RequestHandler):
         super().__init__(**kwargs)
         self.routes = {}
         self.requests = []
+        self.require_watch = False
+        self.watched = set()
+
+    def _refusal(self, request, key):
+        """Why the real site would answer 401, or ``None``."""
+        method, hostname, path = key
+        cookies = cookie_names(request.headers.get('Cookie') or '')
+        referer = request.headers.get('Referer') == 'https://www.tango.me/'
+        if key == TOKEN:
+            if 'Tango-VT' not in cookies or not referer:
+                return 'token without the visitor cookie or Referer'
+        elif path.endswith('.m3u8'):
+            if not {'tt', 'ttu', 'tte'} <= cookies or not referer:
+                return 'playlist without the token triplet or Referer'
+            # Every CDN fixture belongs to STREAM_ID.
+            if self.require_watch and STREAM_ID not in self.watched:
+                return 'playlist before watch'
+        elif path.endswith('/watch'):
+            if request.headers.get('Accept') != 'application/json':
+                return 'watch without Accept: application/json'
+        elif path.endswith('/catalog/v1'):
+            # Not measured; makes the feed's session step load-bearing.
+            if 'Tango-VT' not in cookies:
+                return 'catalog without the visitor cookie'
+        return None
 
     def _check_extensions(self, extensions):
         # Same extensions UrllibRH accepts, so requests routed at the fake
@@ -147,6 +217,11 @@ class FakeRH(RequestHandler):
         entry = self.routes.get(key)
         if entry is None:
             raise RequestError(f'unrouted request: {request.method} {request.url}')
+        refusal = self._refusal(request, key)
+        if refusal:
+            raise HTTPError(Response(
+                io.BytesIO(refusal.encode()), request.url,
+                email.message.Message(), 401))
         if isinstance(entry, list):
             reply = entry.pop(0) if len(entry) > 1 else entry[0]
         else:
@@ -163,6 +238,8 @@ class FakeRH(RequestHandler):
 
         if reply.status >= 400:
             raise HTTPError(response)
+        if key[2].endswith('/watch'):
+            self.watched.add(key[2].split('/')[-2])
         return response
 
 
