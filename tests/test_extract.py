@@ -264,6 +264,17 @@ class ExtractionTest(unittest.TestCase):
             TangoIE(make_downloader(routes))._resolve_stream_id('nobody')
         self.assertIn('No tango.me profile found', str(ctx.exception))
 
+    def test_the_noscript_page_is_named_without_a_request(self):
+        for path in ('stream/noscript.html', 'live/noscript.html',
+                     'noscript.html'):
+            ydl = make_downloader(base_routes())
+            with self.subTest(path), self.assertRaises(ExtractorError) as ctx:
+                TangoIE(ydl)._real_extract(f'https://www.tango.me/{path}')
+            self.assertIn('noscript.html', str(ctx.exception))
+            self.assertIn('https://www.tango.me/stream/', str(ctx.exception))
+            self.assertIs(ctx.exception.expected, True)
+            self.assertEqual(ydl.fake.requests, [])
+
     def test_a_percent_encoded_alias_is_decoded(self):
         info = TangoIE(make_downloader(base_routes()))._real_extract(
             f'https://www.tango.me/%40{ALIAS}')
