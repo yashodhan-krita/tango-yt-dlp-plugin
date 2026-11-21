@@ -91,6 +91,20 @@ the broadcast has been running, and yt-dlp turns it into `upload_date`, so
 `%(upload_date)s` in an output template is the day the stream began. The
 value can be off by a few seconds.
 
+### Coming from yt-dlp issue #11433?
+
+[yt-dlp#11433](https://github.com/yt-dlp/yt-dlp/issues/11433) reports
+`Unsupported URL` for `https://tango.me/stream/noscript.html`. That is the page
+tango shows a client without JavaScript, and it carries no stream id. Pass the
+original `https://www.tango.me/stream/<id>` URL or a profile URL instead; this
+plugin names the no-script page in its error rather than guessing.
+
+The workaround in that thread, a copied `master.m3u8?token=...` link, stops
+after 2-3 minutes: the CDN answers 401 to `?token=` on its own and wants a
+cookie triplet that expires every ten seconds. This plugin joins the stream
+through tango's API, reads the real playlist URL from it, and refreshes that
+cookie for as long as the recording runs.
+
 ### Anonymous vs logged in
 
 | | Anonymous | `--cookies-from-browser chrome` |

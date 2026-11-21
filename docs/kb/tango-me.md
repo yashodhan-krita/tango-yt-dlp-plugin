@@ -345,6 +345,42 @@ A first attempt served 0.04x and one segment every 20 s. `#EXTINF` and
 merged playlist listed all the segment tags before all the URIs. ffmpeg read
 it as malformed. Segment tags must travel with their segment.
 
+## yt-dlp issue #11433 (reviewed 2026-11-21)
+
+<https://github.com/yt-dlp/yt-dlp/issues/11433> asks for tango.me support and
+is still open. Every comment was read and the claims were probed live on
+2026-11-21. What it establishes:
+
+1. **The reported failure is generic extraction.** In 2024 tango redirected a
+   client without JavaScript to `/stream/noscript.html`; yt-dlp followed the
+   redirect and reported `Unsupported URL`. This plugin never reads that page,
+   so the redirect cannot break it. The server redirect is gone (the URL now
+   answers 200 directly), but the route still exists, and `watch` with id
+   `noscript.html` answers HTTP 400 `Unexpected server error: Illegal base64
+   character 2e`. Before this review the plugin read it as an alias and
+   reported `No tango.me profile found for "noscript.html"`. `TangoIE` now
+   names the no-JavaScript page for `/stream/noscript.html`,
+   `/live/noscript.html` and `/noscript.html` and raises before any request.
+2. **The CDN path hash is not the stream id.** The issue notes that "this ID
+   seems differ". `watch` returns the stream's own 22-char id and
+   `hlsStreamInfo.masterUrl` at
+   `https://cinema-in41.tango.me/v2/<32 hex>/master.m3u8`. The extractor reads
+   `masterUrl`; building the path from the stream id would 404.
+3. **`?token=` alone is not authentication.** The master URL answers 401 with
+   `?token=<token>&username=<user>` and no cookies, 401 with nothing, and 200
+   with the `tt` / `ttu` / `tte` cookies only. That is why a pasted
+   `master.m3u8` link "stops after 2-3 minutes", and why this plugin sends the
+   triplet as cookies.
+4. **`token-data` sets the triplet itself.** Its response sets `tt`, `ttu` and
+   `tte` with `Max-Age=10`, matching the page's ten-second poll. It also sets
+   `datadome`, which this plugin drops (`_DROP_COOKIES`).
+5. **`watch` answers protobuf unless asked for JSON.** Send
+   `Accept: application/json`, as `_api_headers` does.
+
+On the issue's own inputs the plugin now answers: the dead stream id gives
+`The stream has ended`, and the alias `immm11` gives
+`No tango.me profile found for "immm11"`. Both are correct.
+
 ## Packaging and plugin loading
 
 - yt-dlp loads plugins from the `yt_dlp_plugins` namespace package, from

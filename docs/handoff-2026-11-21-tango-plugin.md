@@ -2,6 +2,9 @@
 
 State as of 2026-11-21. The work described here ends at `cc54b97`; this
 handoff is the commit after it. Working tree clean, 59 offline tests passing.
+A later review of yt-dlp issue #11433 on branch
+`fix/noscript-page-and-issue-notes` added a named error for tango's
+no-JavaScript page; 60 tests pass there (see section 9).
 This document is for whoever picks the plugin up next. It records what the
 tool does now, the contracts the site imposes, the parts that are easy to
 break, and the work that is still open. The short version of the site's
@@ -48,6 +51,10 @@ Rules that users can rely on:
 - A bare `/<22-char-id>` is a profile now, not a stream. That is a deliberate
   behaviour change from the first version; use `/stream/<id>` to mean a
   stream id.
+- `/stream/noscript.html`, `/live/noscript.html` and `/noscript.html` are
+  tango's no-JavaScript page. They raise an expected error naming that page
+  and asking for the original stream or profile URL, with no network request
+  (`_NON_CONTENT_ROUTES`).
 
 Recommended tracking command (README has the long form):
 
@@ -256,6 +263,18 @@ Verification after the fixes: 59 offline tests OK; live resolve for alias,
 followers; offline profile raises the wait hint; 23–38 s recordings with 0
 skipped segments.
 
+### yt-dlp issue #11433 review (2026-11-21)
+
+Every comment on <https://github.com/yt-dlp/yt-dlp/issues/11433> was read and
+its claims probed live. One defect came out of it: `/stream/noscript.html`
+was read as an alias and reported `No tango.me profile found for
+"noscript.html"`. It now raises a named, expected error before any request
+(`test_the_noscript_page_is_named_without_a_request`; 59 → 60 tests). The
+rest is recorded in `docs/kb/tango-me.md` under "yt-dlp issue #11433": the
+CDN path hash is not the stream id, `?token=` alone answers 401, `token-data`
+sets the cookie triplet with `Max-Age=10`, and `watch` answers protobuf
+without `Accept: application/json`.
+
 ## 10. Open work
 
 Ordered by value, with the exact next step.
@@ -293,6 +312,11 @@ Ordered by value, with the exact next step.
 6. **No CI yet.** Tests run by hand. The repo is public; a two-line workflow
    (install yt-dlp, run `unittest discover`) would make the suite a gate
    instead of a habit.
+
+7. **yt-dlp issue #11433 is still open upstream.** Whether to post there is
+   an operator decision, not a code change. Accepting a raw
+   `master.m3u8?token=` URL stays out of scope: the token needs a stream id
+   to refresh.
 
 ## 11. Known traps
 

@@ -52,6 +52,11 @@ _WATCH_ERRORS = {
     'FAILED_BAD_REQUEST': 'tango.me refused the stream lookup; audio rooms are the usual cause',
 }
 
+# Site pages that match the URL pattern but carry no stream or profile.  tango
+# sends clients without JavaScript to ``noscript.html``; ``watch`` cannot parse
+# that as an id and the alias path would misreport it as a missing profile.
+_NON_CONTENT_ROUTES = frozenset({'noscript.html'})
+
 
 class TangoTokenRefresher:
     """Keeps the CDN auth cookies fresh.
@@ -1059,6 +1064,12 @@ class TangoIE(TangoBase):
 
     def _real_extract(self, url):
         match = self._match_valid_url(url)
+        if match.group('id').lower() in _NON_CONTENT_ROUTES:
+            raise ExtractorError(
+                f'tango.me served its no-JavaScript page ({match.group("id")}), '
+                'which carries no stream id. Pass the original '
+                'https://www.tango.me/stream/<id> URL or a profile URL',
+                expected=True)
         return self._extract_stream(
             url, match.group('id'),
             is_profile=match.group('kind') not in ('stream', 'live'))
