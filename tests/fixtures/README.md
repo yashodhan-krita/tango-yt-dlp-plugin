@@ -19,6 +19,8 @@ file.
 | `watch_wrong_id.json` | `POST https://www.tango.me/api/visitors/stream/client/v2/stream/<bad-id>/watch?requestId=` | empty (`Content-Type: application/json`) |
 | `watch_terminated.json` | `POST https://www.tango.me/api/visitors/stream/client/v2/stream/<ended-id>/watch?requestId=` | empty (`Content-Type: application/json`) |
 | `watch_bad_request.json` | `POST https://www.tango.me/api/visitors/stream/client/v2/stream/<audio-room-id>/watch?requestId=` | empty (`Content-Type: application/json`) |
+| `watch_need_ticket.json` | `POST https://www.tango.me/api/visitors/stream/client/v2/stream/<ticket-gated-id>/watch?requestId=` | empty (`Content-Type: application/json`) |
+| `watch_unauthorized.json` | `POST https://www.tango.me/api/visitors/stream/client/v2/stream/<ticket-gated-id>/watch?requestId=` | empty (`Content-Type: application/json`) |
 | `alias_convert.txt` | `GET https://www.tango.me/api/visitors/profilealias/api/alias/convert?alias=tango_tester` | — |
 | `stream_id.txt` | `GET https://www.tango.me/api/showroom-streams/api/public/stream/v1/id?broadcasterId=GGGGHHHHIIIIJJJJKKKKLL` | — |
 | `profile.html` | `GET https://www.tango.me/stream/AAAABBBBCCCCDDDDEEEEFF` | — |
@@ -36,7 +38,15 @@ and point counters kept as observed).  It is the only row captured fresh.
 `{"code": ...}` shapes recorded in `PLAN.md` rather than fresh captures: a
 terminated stream and an audio room both answer the same watch call, but the
 capture session predates this fixture set, so their bodies are reconstructed
-from the documented failure modes.  The remaining rows (`check_in.json`,
+from the documented failure modes.
+
+`watch_need_ticket.json` and `watch_unauthorized.json` follow the gating
+shapes measured 2026-11-22 (recorded in the tango-mobile-lab
+`docs/kb/premium-gating.md`): a ticket-gated stream answers a full watch
+document with `streamKind: TICKET_PRIVATE` and all four playback URLs set to
+`NO_URL`, and the visitor route answers the bare `FAILED_UNAUTHORIZED` code.
+The bodies here are trimmed to the fields the extractor reads, with the fixed
+test ids; they are not byte captures.  The remaining rows (`check_in.json`,
 `token.json`, `watch_wrong_id.json`, `alias_convert.txt`, `stream_id.txt`,
 `profile.html`, `profile_page.html`, `profile_page_account.html`,
 `feed.json`, `master.m3u8`, `hd.m3u8`, `ld.m3u8`) are likewise reconstructed
