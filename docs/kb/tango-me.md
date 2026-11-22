@@ -2,7 +2,8 @@
 
 Last verified 2026-11-20 against the live site and yt-dlp 2026.10.26;
 profile tracking, playlist authorisation and the session rules re-measured
-2026-11-21. This note is the durable record: the
+2026-11-21; premium and ticket gating measured 2026-11-22. This note is the
+durable record: the
 contract, the measured behaviour, the traps, and how to check each claim
 again. `PLAN.md` is the shorter design record; `README.md` is for users.
 
@@ -120,6 +121,8 @@ segment must still be within 70 s of its appearance when ffmpeg asks for it.
 | `FAILED_WRONG_STREAM_ID` | No such stream | Typo or stale id |
 | `FAILED_TERMINATED` | Broadcast over | Stream ended before the download started |
 | `FAILED_BAD_REQUEST` | Lookup refused | Audio rooms are the known case |
+| `FAILED_NEED_TICKET` | Paid per-stream ticket | A `TICKET_PRIVATE` stream; see Premium and ticket gating |
+| `FAILED_UNAUTHORIZED` | Not entitled | A gated stream asked from a visitor session |
 
 A wrong id is never a retry. Treat 200-with-code as the answer.
 
@@ -244,6 +247,59 @@ an authorisation step, and `TangoCdnIE` skips it.
 Check-in cookies are host-only for `www.tango.me`. If a fake or a test reply
 sets `Domain=www.tango.me`, the standard library stores them as
 `.www.tango.me` cookies instead, which changes which requests send them.
+
+## Premium and ticket gating
+
+There are two paywalls, and they are not the same gate:
+
+| Gate | `streamKind` | Key |
+| --- | --- | --- |
+| Subscription | `PREMIUM` | an active VIP subscription on the account |
+| Per-stream ticket | `TICKET_PRIVATE` | credits for that one broadcast (`ticketPrice`) |
+
+`PUBLIC` and `PRIVATE` are not paywalls. `PRIVATE` is an audience
+restriction (followers-only), which the extractor already implements.
+
+**A paywall is answered, not failed.** `watch` still returns HTTP 200 and a
+full document, and every playback field is the literal string `NO_URL`:
+`masterUrl`, `previewUrl`, `liveListUrl`, `completeListUrl`. Measured
+2026-11-22 on a live `TICKET_PRIVATE` stream at 599 credits: the visitor
+route answered `FAILED_UNAUTHORIZED` (bare code), and the account's own
+bearer on the app route answered `FAILED_NEED_TICKET` with the full document
+and `streamKind: TICKET_PRIVATE`. The extractor translates the two measured
+codes, so a gated stream reports the gate instead of a generic refusal.
+
+The JWT carries no entitlement claim — only account, session, `guest`,
+`suspended`, `authzScope`, expiry — so the decision is entirely server-side
+and cannot be inferred client-side.
+
+**Why a refusal is not the end of the road.** The CDN authorises a playlist by
+request path plus the ten-second visitor triplet, and does **not** check the
+viewer's entitlement to that stream (see the two facts at the top). A gated
+stream's missing piece is therefore the CDN `<hash>`, not a credential. Given
+the hash, `tango:cdn` records the stream with an ordinary visitor triplet and
+no account at all. The hash is not derivable from the stream id (see yt-dlp
+issue #11433 below), and a refused `watch` does not disclose it.
+
+Consequences worth knowing:
+
+- Gated streams never appear in the `/live` catalog: it is public-only. 130
+  items sampled, `isPrivateStream` false in every one, and the items carry a
+  tokenless `masterListUrl`.
+- The paywall a user actually meets is `TICKET_PRIVATE`. Twenty gated streams
+  sampled live (a tag list and two recommendation payloads) were all tickets,
+  99–1499 credits, none `PREMIUM`. Tango's web "premium" entrance is a tag
+  filter over those ticket streams, not a subscription catalogue; its catalog
+  `premium` category is 100 public streams.
+- The catalog's `previewListUrl` was `null` even for public streams, so a
+  null there does not mean a stream has no preview.
+- Codes known from the DEX but not yet observed live, so left untranslated:
+  `FAILED_SUBSCRIPTION`, `FAILED_NOT_INVITED`, `FAILED_NOT_TICKET_PRIVATE`,
+  `FAILED_ALREADY_BOUGHT_TICKET`,
+  `FAILED_ALREADY_BOUGHT_ON_DIFFERENT_ACCOUNT`. Do not guess a fix for them.
+
+The full measured model, the three bypass lanes, and the detection rules live
+in the lab repo: `tango-mobile-lab/docs/kb/premium-gating.md`.
 
 ## Architecture
 
@@ -631,6 +687,12 @@ master fetch went through the proxy: it needs its per-request
   restored account cookies are accepted, and whether carrying them on the
   token calls changes the 403 recovery, is `[needs live check]` (Session
   rules).
+- `PREMIUM` (subscription) gating was not measured. `TICKET_PRIVATE` was
+  (Premium and ticket gating), and the two gates are separate, so do not
+  carry the `NO_URL` result across. Whether `PREMIUM` discloses a
+  `previewListUrl` to a non-subscriber is still unmeasured: no `PREMIUM` stream
+  has been seen live, so the kind may be legacy. It is the open question that
+  decides whether a gated CDN path can be recovered without paying.
 - Alias case: settled 2026-11-21. Every case variant of an alias resolved
   to the same account id, so the extractor passes it through unchanged.
   Route names (`/Live`, `/Stream/`) are matched case-insensitively
@@ -656,6 +718,8 @@ master fetch went through the proxy: it needs its per-request
 ## Sources
 
 - `PLAN.md` — decoded contract, measurements, design decisions.
+- `tango-mobile-lab` `docs/kb/premium-gating.md` — the gating model, the
+  three bypass lanes, and the captcha rules the lab measured.
 - `docs/superpowers/specs/2026-11-20-tango-hardening-design.md` — the
   hardening round's intent and constraints.
 - `tests/fixtures/README.md` — fixture provenance.

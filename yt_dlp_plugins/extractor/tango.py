@@ -52,6 +52,10 @@ _WATCH_ERRORS = {
     'FAILED_WRONG_STREAM_ID': 'No tango.me stream has that id',
     'FAILED_TERMINATED': 'The stream has ended',
     'FAILED_BAD_REQUEST': 'tango.me refused the stream lookup; audio rooms are the usual cause',
+    # Gated streams.  A paywall is a semantic answer, not a transport failure:
+    # the body is a full watch document whose playback URLs are all ``NO_URL``.
+    'FAILED_NEED_TICKET': 'This stream needs a paid ticket',
+    'FAILED_UNAUTHORIZED': 'tango.me refused this stream; a gated stream is not open to a visitor',
 }
 
 # Site pages that match the URL pattern but carry no stream or profile.  tango

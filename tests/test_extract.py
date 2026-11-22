@@ -79,6 +79,9 @@ WATCH_ERRORS = {
     'watch_wrong_id.json': 'No tango.me stream has that id',
     'watch_terminated.json': 'The stream has ended',
     'watch_bad_request.json': 'audio rooms are the usual cause',
+    # Gated streams answer a full document with NO_URL playback fields.
+    'watch_need_ticket.json': 'needs a paid ticket',
+    'watch_unauthorized.json': 'not open to a visitor',
 }
 
 
