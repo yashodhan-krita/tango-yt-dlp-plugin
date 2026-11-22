@@ -286,6 +286,11 @@ Consequences worth knowing:
 - Gated streams never appear in the `/live` catalog: it is public-only. 130
   items sampled, `isPrivateStream` false in every one, and the items carry a
   tokenless `masterListUrl`.
+- The paywall a user actually meets is `TICKET_PRIVATE`. Twenty gated streams
+  sampled live (a tag list and two recommendation payloads) were all tickets,
+  99–1499 credits, none `PREMIUM`. Tango's web "premium" entrance is a tag
+  filter over those ticket streams, not a subscription catalogue; its catalog
+  `premium` category is 100 public streams.
 - The catalog's `previewListUrl` was `null` even for public streams, so a
   null there does not mean a stream has no preview.
 - Codes known from the DEX but not yet observed live, so left untranslated:
@@ -685,8 +690,9 @@ master fetch went through the proxy: it needs its per-request
 - `PREMIUM` (subscription) gating was not measured. `TICKET_PRIVATE` was
   (Premium and ticket gating), and the two gates are separate, so do not
   carry the `NO_URL` result across. Whether `PREMIUM` discloses a
-  `previewListUrl` to a non-subscriber is the open question that decides
-  whether a gated CDN path can be recovered without paying.
+  `previewListUrl` to a non-subscriber is still unmeasured: no `PREMIUM` stream
+  has been seen live, so the kind may be legacy. It is the open question that
+  decides whether a gated CDN path can be recovered without paying.
 - Alias case: settled 2026-11-21. Every case variant of an alias resolved
   to the same account id, so the extractor passes it through unchanged.
   Route names (`/Live`, `/Stream/`) are matched case-insensitively
